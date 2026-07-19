@@ -1,0 +1,24 @@
+# 流水线产出物：chunk parquet、ChromaDB、BM25 索引 pickle、批次归档等（体积大，需重新运行流水线生成）
+pipeline_output/
+
+# 原始/合并数据清单（体积大，可通过 utils/download_filelist_csv.py 等脚本重新生成；
+# 单个 oa_comm_filelist_merged.csv 超过 GitHub 100MB 单文件限制）
+data/
+
+# 运行日志
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Claude Code 本地工具配置（个人权限设置，不随项目分发）
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db

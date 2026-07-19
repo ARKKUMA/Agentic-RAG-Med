@@ -1,0 +1,207 @@
+{
+  "total_analyzed": 2000,
+  "parse_errors": 0,
+  "missing_rate_%": {
+    "pmid": 19.9,
+    "pmc_id": 0.0,
+    "doi": 5.2,
+    "title": 0.0,
+    "journal": 0.0,
+    "pub_date": 5.95,
+    "abstract": 9.5,
+    "keywords": 39.0,
+    "article_type": 0.0
+  },
+  "short_abstract_count": 3,
+  "short_abstract_rate_%": 0.15,
+  "no_body_count": 94,
+  "no_body_rate_%": 4.7,
+  "top_journals": [
+    [
+      "PLoS ONE",
+      184
+    ],
+    [
+      "Scientific Reports",
+      65
+    ],
+    [
+      "British Journal of Cancer",
+      29
+    ],
+    [
+      "The Hospital",
+      29
+    ],
+    [
+      "Sensors (Basel, Switzerland)",
+      27
+    ],
+    [
+      "International Journal of Molecular Sciences",
+      21
+    ],
+    [
+      "Cureus",
+      21
+    ],
+    [
+      "Materials",
+      20
+    ],
+    [
+      "Nature Communications",
+      19
+    ],
+    [
+      "Frontiers in Immunology",
+      18
+    ],
+    [
+      "Frontiers in Psychology",
+      18
+    ],
+    [
+      "Acta Crystallographica Section E: Structure Reports Online",
+      16
+    ],
+    [
+      "Frontiers in Plant Science",
+      16
+    ],
+    [
+      "Oncotarget",
+      16
+    ],
+    [
+      "BMC Public Health",
+      16
+    ],
+    [
+      "BMC Genomics",
+      16
+    ],
+    [
+      "Journal of Clinical Medicine",
+      14
+    ],
+    [
+      "International Journal of Environmental Research and Public Health",
+      14
+    ],
+    [
+      "BioMed Research International",
+      13
+    ],
+    [
+      "PLOS One",
+      13
+    ]
+  ],
+  "pub_year_dist": {
+    "1840": 1,
+    "1841": 1,
+    "1846": 1,
+    "1854": 1,
+    "1856": 1,
+    "1857": 1,
+    "1874": 1,
+    "1877": 2,
+    "1880": 1,
+    "1882": 2,
+    "1883": 2,
+    "1884": 1,
+    "1887": 3,
+    "1889": 4,
+    "1890": 2,
+    "1891": 2,
+    "1893": 1,
+    "1895": 1,
+    "1897": 1,
+    "1898": 1,
+    "1899": 1,
+    "1900": 4,
+    "1901": 4,
+    "1902": 2,
+    "1903": 2,
+    "1905": 2,
+    "1906": 1,
+    "1907": 1,
+    "1908": 2,
+    "1910": 2,
+    "1911": 1,
+    "1915": 1,
+    "1916": 2,
+    "1918": 2,
+    "1919": 1,
+    "1920": 1,
+    "1950": 1,
+    "1959": 1,
+    "1964": 1,
+    "1974": 1,
+    "1975": 1,
+    "1980": 1,
+    "1981": 1,
+    "1982": 1,
+    "1983": 1,
+    "1989": 1,
+    "1991": 2,
+    "1993": 1,
+    "1994": 1,
+    "1996": 2,
+    "1997": 3,
+    "1998": 1,
+    "1999": 2,
+    "2000": 3,
+    "2001": 1,
+    "2003": 1,
+    "2004": 4,
+    "2005": 6,
+    "2006": 16,
+    "2007": 12,
+    "2008": 34,
+    "2009": 47,
+    "2010": 69,
+    "2011": 74,
+    "2012": 109,
+    "2013": 79,
+    "2014": 142,
+    "2015": 112,
+    "2016": 96,
+    "2017": 97,
+    "2018": 133,
+    "2019": 14,
+    "2020": 103,
+    "2021": 61,
+    "2022": 76,
+    "2023": 98,
+    "2024": 107,
+    "2025": 115,
+    "2026": 191
+  },
+  "article_types": {
+    "research-article": 1516,
+    "review-article": 186,
+    "other": 52,
+    "case-report": 48,
+    "brief-report": 35,
+    "correction": 31,
+    "abstract": 31,
+    "editorial": 30,
+    "letter": 24,
+    "book-review": 10,
+    "systematic-review": 8,
+    "discussion": 5,
+    "data-paper": 4,
+    "article-commentary": 4,
+    "news": 4,
+    "methods-article": 3,
+    "case-study": 2,
+    "meeting-report": 2,
+    "protocol": 1,
+    "product-review": 1,
+    "reply": 1,
+    "retraction": 1,
+    "rapid-communication": 1
+  }
+}

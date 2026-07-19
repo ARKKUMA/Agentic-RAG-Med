@@ -1,0 +1,42 @@
+# PMC oa_comm RAG Pipeline
+# Python 3.11+  |  CUDA 12.8
+#
+# 安装顺序：
+#   1. pip install torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu128
+#   2. pip install -r requirements.txt
+
+# ── 文本处理 ──────────────────────────────────────────────────────
+tiktoken==0.13.0
+regex==2026.1.15
+langchain-text-splitters==1.1.2
+langchain-core==1.4.8
+
+# ── 数据处理 ──────────────────────────────────────────────────────
+pandas==2.3.3
+pyarrow==24.0.0
+numpy==2.3.5
+scipy==1.18.0
+
+# ── 向量数据库 ────────────────────────────────────────────────────
+chromadb==1.5.9
+
+# ── 检索 / 重排序 ─────────────────────────────────────────────────
+rank_bm25==0.2.2
+
+# ── 嵌入模型 ──────────────────────────────────────────────────────
+sentence-transformers==5.6.0
+transformers==5.12.1
+tokenizers==0.22.2
+huggingface-hub==1.20.1
+safetensors==0.7.0
+
+# ── 工具库 ────────────────────────────────────────────────────────
+tqdm==4.67.1
+requests==2.32.5
+packaging==25.0
+filelock==3.20.3
+psutil==7.2.1
+
+# ── PyTorch (CUDA 12.8) — 不要直接 pip install，见上方安装顺序 ──
+# torch==2.10.0+cu128
+# torchvision==0.25.0+cu128
