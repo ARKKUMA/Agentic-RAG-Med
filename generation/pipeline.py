@@ -13,7 +13,9 @@ import threading
 import time
 from pathlib import Path
 
+from .citation_validator import CitationValidator
 from .context_assembler import ContextAssembler, DocumentChunk
+from .format_checker import FormatChecker
 from .llm_generator import LLMGenerator
 from .prompt_templates import (
     DISCLAIMERS,
@@ -21,8 +23,11 @@ from .prompt_templates import (
     MEDICAL_PROMPT_STAGES,
     REFERENCES_HEADER,
     PromptStage,
+    build_hard_constraints,
     detect_query_language,
 )
+
+MAX_CITATION_RETRIES = 2  # 引用校验失败时的最大重试次数，超过后走兜底修正（剔除无效引用）
 
 
 class MedicalGenerationPipeline:
@@ -45,6 +50,8 @@ class MedicalGenerationPipeline:
         self.context_assembler = context_assembler or ContextAssembler()
         self.stages = prompt_stages or MEDICAL_PROMPT_STAGES
         self.log = log or logging.getLogger("medical_generation_pipeline")
+        self.citation_validator = CitationValidator()
+        self.format_checker = FormatChecker(log=self.log)
 
         self.log_path = Path(log_path) if log_path else None
         if self.log_path:
@@ -54,16 +61,73 @@ class MedicalGenerationPipeline:
         self._log_lock = threading.Lock()
 
     # ── 提示词填充 + 单阶段调用 ───────────────────────────────────
-    def _run_stage(self, stage_key: str, require_json: bool, **template_vars) -> dict:
+    def _run_stage(
+        self,
+        stage_key: str,
+        require_json: bool,
+        extra_system_prompt: str = "",
+        **template_vars,
+    ) -> dict:
+        """
+        extra_system_prompt：多层次 system_prompt 设计的"第 0 层"——若提供，
+        前置拼接到该阶段自身的任务专属 system_prompt（"第 1 层"）之前。
+        目前用于给 answer_generator/final_assembler 注入 build_hard_constraints()
+        渲染出的强约束指令块。
+        """
         stage = self.stages[stage_key]
         prompt = stage.user_prompt_template.format(**template_vars)
+        system_prompt = (
+            f"{extra_system_prompt}\n\n{stage.system_prompt}" if extra_system_prompt else stage.system_prompt
+        )
         return self.llm.generate(
             prompt=prompt,
-            system_prompt=stage.system_prompt,
+            system_prompt=system_prompt,
             temperature=stage.temperature,
             max_tokens=stage.max_tokens,
             require_json=require_json,
         )
+
+    # ── 答案生成 + 引用校验重试循环 ───────────────────────────────
+    def _generate_grounded_answer(
+        self,
+        query: str,
+        context_text: str,
+        valid_ids: set[int],
+        language_directive: str,
+        hard_constraints: str,
+    ) -> tuple[str, dict, int]:
+        """
+        调用 answer_generator 生成草稿，并校验其 [来源 N] 引用是否都落在
+        valid_ids 范围内。校验失败时，把具体问题反馈给模型重试（最多
+        MAX_CITATION_RETRIES 次）；重试次数用尽仍未通过则兜底剔除无效引用标记，
+        保证绝不会有虚假来源编号流出到最终答案。
+
+        Returns:
+            (draft_answer, last_validation, attempts_used)
+        """
+        retry_note = ""
+        draft_answer = ""
+        validation: dict = {}
+
+        for attempt in range(MAX_CITATION_RETRIES + 1):
+            draft_out = self._run_stage(
+                "answer_generator", require_json=False,
+                extra_system_prompt=hard_constraints,
+                query=query, context=context_text or "（未检索到相关文献）",
+                language_directive=language_directive,
+                retry_note=retry_note,
+            )
+            draft_answer = draft_out["text"].strip()
+            validation = self.citation_validator.validate(draft_answer, valid_ids)
+            if validation["pass"]:
+                return draft_answer, validation, attempt
+
+            self.log.warning(f"引用校验未通过（第 {attempt + 1} 次尝试）：{validation}")
+            retry_note = self.citation_validator.build_retry_instruction(validation)
+
+        # 重试次数用尽仍未通过 -> 兜底修正：直接剔除无效引用标记
+        fixed = self.citation_validator.strip_invalid_citations(draft_answer, valid_ids)
+        return fixed, validation, MAX_CITATION_RETRIES + 1
 
     # ── 基于评估结果筛选上下文（剔除被判定不相关的来源）──────────
     @staticmethod
@@ -115,10 +179,12 @@ class MedicalGenerationPipeline:
             refs = [REFERENCES_HEADER.get(language, REFERENCES_HEADER["zh"])]
             for i, c in enumerate(selected_chunks, start=1):
                 citation_id = c.metadata.get("_citation_id", i)
+                title = c.metadata.get("source_title") or "Untitled"
                 journal = c.metadata.get("journal", "?")
                 year = c.metadata.get("pub_year", "?")
                 pmc_id = c.metadata.get("pmc_id", "?")  # 已含 "PMC" 前缀，不再重复拼接
-                refs.append(f"[{citation_id}] {journal} ({year}), {pmc_id}")
+                # 格式须与 format_checker._REF_ENTRY_RE 保持一致（标题/期刊/年份齐全，用 "—" 分隔）
+                refs.append(f"[{citation_id}] {title} — {journal} ({year}), {pmc_id}")
             text = text + "\n".join(refs)
         return text + DISCLAIMERS.get(language, DISCLAIMERS["zh"])
 
@@ -178,6 +244,7 @@ class MedicalGenerationPipeline:
         # 本地模型（尤其中文背景较重的）经常在自由文本生成时默认切回中文
         query_language = detect_query_language(query)
         language_directive = LANGUAGE_DIRECTIVES[query_language]
+        hard_constraints = build_hard_constraints(query_language)
 
         # 1. 检索
         t0 = time.time()
@@ -214,16 +281,23 @@ class MedicalGenerationPipeline:
                 context_text, selected_chunks, evaluation_json
             )
 
-        # 4. 答案草稿生成
+        # 4. 答案草稿生成（含引用校验重试循环）
         t0 = time.time()
         draft_answer = ""
+        citation_validation: dict = {}
+        citation_retry_attempts = 0
+        valid_citation_ids = {
+            c.metadata.get("_citation_id") for c in selected_chunks
+            if c.metadata.get("_citation_id") is not None
+        }
         try:
-            draft_out = self._run_stage(
-                "answer_generator", require_json=False,
-                query=query, context=context_text or "（未检索到相关文献）",
+            draft_answer, citation_validation, citation_retry_attempts = self._generate_grounded_answer(
+                query=query,
+                context_text=context_text,
+                valid_ids=valid_citation_ids,
                 language_directive=language_directive,
+                hard_constraints=hard_constraints,
             )
-            draft_answer = draft_out["text"].strip()
             stage_success["answer_generation"] = bool(draft_answer)
             token_counts["draft_answer"] = self.context_assembler.estimate_tokens(draft_answer)
         except Exception as e:
@@ -256,6 +330,7 @@ class MedicalGenerationPipeline:
                 try:
                     final_out = self._run_stage(
                         "final_assembler", require_json=False,
+                        extra_system_prompt=hard_constraints,
                         query=query, draft_answer=draft_answer,
                         review_feedback=json.dumps(review_json, ensure_ascii=False),
                         language_directive=language_directive,
@@ -272,23 +347,34 @@ class MedicalGenerationPipeline:
         stage_times["final_assembly"] = round(time.time() - t0, 2)
         token_counts["final_answer"] = self.context_assembler.estimate_tokens(final_answer)
 
-        # 7. 生成后处理
+        # 7. 最终安全网：无论最终答案来自草稿还是 final_assembler 重写，都再校验一次
+        # 引用有效性——final_assembler 在"修复"审查意见时有可能引入新的无效引用，
+        # 这一步兜底剔除任何残留的虚假来源编号，确保绝不外泄
+        final_answer = self.citation_validator.strip_invalid_citations(final_answer, valid_citation_ids)
+
+        # 8. 生成后处理
         final_answer = self._postprocess(final_answer, selected_chunks, language=query_language)
+
+        # 9. 格式合规检查（章节标题 / 缩写全称 / 参考文献完整性）
+        format_check = self.format_checker.check(final_answer, language=query_language)
 
         result = {
             "query": query,
             "answer": final_answer,
             "context_metadata": context_result["metadata"],
+            "format_check": format_check,
             "generation_metrics": {
                 "total_time_seconds": round(time.time() - t_start, 2),
                 "stage_times": stage_times,
                 "token_counts": token_counts,
+                "citation_retry_attempts": citation_retry_attempts,
                 "stage_success": stage_success,
             },
             "intermediate_results": {
                 "evidence_evaluation": evaluation_json,
                 "draft_answer": draft_answer,
                 "review_feedback": review_json,
+                "citation_validation": citation_validation,
             },
             "sources": self._format_sources(selected_chunks),
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),

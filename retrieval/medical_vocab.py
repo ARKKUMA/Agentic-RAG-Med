@@ -73,6 +73,8 @@ ABBREVIATIONS: dict[str, list[str]] = {
     "hr":    ["hazard ratio"],
     "ci":    ["confidence interval"],
     "nnt":   ["number needed to treat"],
+    "snp":   ["single nucleotide polymorphism"],
+    "gwas":  ["genome-wide association study"],
     # 中文缩写
     "二甲双胍": ["metformin"],
     "心梗":    ["myocardial infarction", "heart attack"],

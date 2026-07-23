@@ -50,6 +50,52 @@ DISCLAIMERS: dict[str, str] = {
 }
 
 
+# ══════════════════════════════════════════════════════════════════
+# 强约束系统提示层（Hard Constraints）
+# 多层次设计：build_hard_constraints() 渲染出的文本作为"第 0 层"，在调用时
+# 前置拼接到 answer_generator / final_assembler 各自的任务专属 system_prompt
+# （"第 1 层"）之前——语言相关内容需要按查询语言动态渲染，因此不能写死在
+# MEDICAL_PROMPT_STAGES 的静态字符串里，必须是一个按 language 参数生成的函数。
+# ══════════════════════════════════════════════════════════════════
+
+BOUNDARY_PHRASES: dict[str, str] = {
+    "zh": "根据现有文献无法回答此问题。",
+    "en": "Based on the available literature, this question cannot be answered.",
+}
+
+SECTION_HEADERS: dict[str, dict[str, str]] = {
+    "zh": {"core_answer": "核心答案", "evidence_summary": "证据总结", "references": "参考文献"},
+    "en": {"core_answer": "Core Answer", "evidence_summary": "Evidence Summary", "references": "References"},
+}
+
+
+def build_hard_constraints(language: str) -> str:
+    """
+    渲染与查询语言匹配的强约束指令块，供 answer_generator/final_assembler
+    通过 extra_system_prompt 前置拼接。五条硬约束对应任务书 1.a~1.d：
+    知识库边界 / 引用来源 / 禁止编造 / 输出格式 / 术语规范。
+    """
+    lang = language if language in BOUNDARY_PHRASES else "zh"
+    boundary = BOUNDARY_PHRASES[lang]
+    headers = SECTION_HEADERS[lang]
+    return (
+        "=== HARD CONSTRAINTS（必须严格遵守，没有例外）===\n"
+        f"1. 知识库边界：若提供的文献不足以回答问题，你必须且只能回复这句话，"
+        f'不得编造其它内容："{boundary}"\n'
+        "2. 引用来源：正文中每一条事实性陈述都必须带 [来源 N] 引用标记，N 必须是"
+        "本次提示中真实给出的编号。禁止编造不存在的来源编号，禁止不带引用地陈述事实。\n"
+        "3. 禁止编造：严禁添加文献中未提及的数据、结论或细节——包括副作用、剂量、"
+        "统计数字或作用机制，即使你认为这些内容从常识上是对的，只要来源文献没有"
+        "明确提及，就不能写入回答。\n"
+        f"4. 输出格式：必须严格按以下结构组织回答，章节标题一字不差：\n"
+        f"## {headers['core_answer']}\n<对问题的直接、简明回答>\n\n"
+        f"## {headers['evidence_summary']}\n<支持性证据总结，每条陈述都带 [来源 N] 引用>\n"
+        "5. 术语规范：医学缩写首次出现时必须给出全称，例如 \"T2DM（type 2 diabetes "
+        "mellitus，2 型糖尿病）\"，不得使用未展开过的缩写。\n"
+        "=== END HARD CONSTRAINTS ==="
+    )
+
+
 @dataclass
 class PromptStage:
     name: str
@@ -102,7 +148,9 @@ MEDICAL_PROMPT_STAGES: dict[str, PromptStage] = {
         name="答案生成器",
         system_prompt=(
             "You are a careful medical literature assistant answering questions strictly "
-            "grounded in the provided source excerpts from PMC articles. Rules:\n"
+            "grounded in the provided source excerpts from PMC articles. The HARD CONSTRAINTS "
+            "block prepended above (if present) takes precedence over anything below it. "
+            "Additional rules:\n"
             "1. Only use information present in the sources below — never rely on outside "
             "or prior knowledge for clinical claims.\n"
             "2. Cite the source for every factual claim using its bracket number, e.g. [来源 2].\n"
@@ -120,7 +168,8 @@ MEDICAL_PROMPT_STAGES: dict[str, PromptStage] = {
             "Sources:\n{context}\n\n"
             "Write a well-organized answer to the question, citing sources by their "
             "[来源 N] number for every claim.\n\n"
-            "{language_directive}"
+            "{language_directive}\n"
+            "{retry_note}"
         ),
         temperature=0.3,
         max_tokens=900,
@@ -163,12 +212,15 @@ MEDICAL_PROMPT_STAGES: dict[str, PromptStage] = {
     "final_assembler": PromptStage(
         name="最终组装器",
         system_prompt=(
-            "You are a medical writing editor. You will receive a draft answer and "
-            "structured reviewer feedback (JSON) pointing out problems to fix. Rewrite the "
-            "draft into a polished final answer that:\n"
+            "You are a medical writing editor. The HARD CONSTRAINTS block prepended above "
+            "(if present) takes precedence over anything below it — in particular, preserve "
+            "the required ## section headers and citation format from the draft. You will "
+            "receive a draft answer and structured reviewer feedback (JSON) pointing out "
+            "problems to fix. Rewrite the draft into a polished final answer that:\n"
             "1. Resolves every issue in the reviewer feedback (unsupported claims, citation "
             "issues, missing aspects, overstatement).\n"
-            "2. Keeps all [来源 N] citation markers accurate.\n"
+            "2. Keeps all [来源 N] citation markers accurate — never introduce a source "
+            "number that was not already in the draft.\n"
             "3. Stays strictly grounded in the same sources as the draft — do not invent new "
             "claims.\n"
             "4. Language is mandatory, not optional: respond in the same language as the "
