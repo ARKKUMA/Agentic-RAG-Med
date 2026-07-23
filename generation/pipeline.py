@@ -9,16 +9,19 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 from pathlib import Path
 
 from .context_assembler import ContextAssembler, DocumentChunk
 from .llm_generator import LLMGenerator
-from .prompt_templates import MEDICAL_PROMPT_STAGES, PromptStage
-
-DISCLAIMER = (
-    "\n\n---\n*本回答基于已检索的 PMC 文献自动生成，仅供参考，不构成医疗建议。"
-    "具体诊疗请咨询专业医生。*"
+from .prompt_templates import (
+    DISCLAIMERS,
+    LANGUAGE_DIRECTIVES,
+    MEDICAL_PROMPT_STAGES,
+    REFERENCES_HEADER,
+    PromptStage,
+    detect_query_language,
 )
 
 
@@ -46,6 +49,9 @@ class MedicalGenerationPipeline:
         self.log_path = Path(log_path) if log_path else None
         if self.log_path:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        # BatchGenerationProcessor 会从多个线程并发调用 generate() -> _log_run()，
+        # 未加锁的并发 append 写可能在文件层面交错出错乱的 JSONL 行
+        self._log_lock = threading.Lock()
 
     # ── 提示词填充 + 单阶段调用 ───────────────────────────────────
     def _run_stage(self, stage_key: str, require_json: bool, **template_vars) -> dict:
@@ -93,17 +99,20 @@ class MedicalGenerationPipeline:
 
     # ── 生成后处理：引用标记 + 格式美化 + 免责声明 ────────────────
     @staticmethod
-    def _postprocess(answer: str, selected_chunks: list[DocumentChunk]) -> str:
+    def _postprocess(answer: str, selected_chunks: list[DocumentChunk], language: str = "zh") -> str:
         """
         补全参考文献列表。引用编号必须使用 ContextAssembler 分配的原始 _citation_id
         （而非当前列表位置）——证据评估阶段可能已剔除部分来源，若按位置重新编号，
         会与正文中模型引用的 [来源 N] 编号错位。
+
+        参考文献标题与免责声明按 language（"zh"/"en"）本地化，避免固定中文样板
+        文字混入英文回答，稀释 ROUGE 等文本相似度评估。
         """
         if not answer:
             return answer
         text = answer.strip()
         if selected_chunks:
-            refs = ["\n\n**参考文献：**"]
+            refs = [REFERENCES_HEADER.get(language, REFERENCES_HEADER["zh"])]
             for i, c in enumerate(selected_chunks, start=1):
                 citation_id = c.metadata.get("_citation_id", i)
                 journal = c.metadata.get("journal", "?")
@@ -111,7 +120,7 @@ class MedicalGenerationPipeline:
                 pmc_id = c.metadata.get("pmc_id", "?")  # 已含 "PMC" 前缀，不再重复拼接
                 refs.append(f"[{citation_id}] {journal} ({year}), {pmc_id}")
             text = text + "\n".join(refs)
-        return text + DISCLAIMER
+        return text + DISCLAIMERS.get(language, DISCLAIMERS["zh"])
 
     @staticmethod
     def _format_sources(selected_chunks: list[DocumentChunk]) -> list[dict]:
@@ -140,8 +149,9 @@ class MedicalGenerationPipeline:
             "stage_success": result["generation_metrics"]["stage_success"],
             "n_sources": len(result["sources"]),
         }
-        with self.log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        with self._log_lock:
+            with self.log_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     # ── 主入口 ────────────────────────────────────────────────────
     def generate(
@@ -164,6 +174,10 @@ class MedicalGenerationPipeline:
         stage_times: dict[str, float] = {}
         stage_success: dict[str, bool] = {}
         token_counts: dict[str, int] = {}
+        # 显式检测查询语言并生成强制指令，而不是仅依赖 system_prompt 里的软性规则——
+        # 本地模型（尤其中文背景较重的）经常在自由文本生成时默认切回中文
+        query_language = detect_query_language(query)
+        language_directive = LANGUAGE_DIRECTIVES[query_language]
 
         # 1. 检索
         t0 = time.time()
@@ -207,6 +221,7 @@ class MedicalGenerationPipeline:
             draft_out = self._run_stage(
                 "answer_generator", require_json=False,
                 query=query, context=context_text or "（未检索到相关文献）",
+                language_directive=language_directive,
             )
             draft_answer = draft_out["text"].strip()
             stage_success["answer_generation"] = bool(draft_answer)
@@ -243,6 +258,7 @@ class MedicalGenerationPipeline:
                         "final_assembler", require_json=False,
                         query=query, draft_answer=draft_answer,
                         review_feedback=json.dumps(review_json, ensure_ascii=False),
+                        language_directive=language_directive,
                     )
                     final_answer = final_out["text"].strip() or draft_answer
                     stage_success["final_assembly"] = True
@@ -257,7 +273,7 @@ class MedicalGenerationPipeline:
         token_counts["final_answer"] = self.context_assembler.estimate_tokens(final_answer)
 
         # 7. 生成后处理
-        final_answer = self._postprocess(final_answer, selected_chunks)
+        final_answer = self._postprocess(final_answer, selected_chunks, language=query_language)
 
         result = {
             "query": query,

@@ -1,3 +1,6 @@
+from .answer_evaluator import AnswerEvaluator
+from .batch_processor import BatchGenerationProcessor
+from .cache import GenerationCache
 from .context_assembler import ContextAssembler, DocumentChunk
 from .llm_generator import LLMGenerator
 from .pipeline import MedicalGenerationPipeline
@@ -10,4 +13,7 @@ __all__ = [
     "MEDICAL_PROMPT_STAGES",
     "LLMGenerator",
     "MedicalGenerationPipeline",
+    "AnswerEvaluator",
+    "GenerationCache",
+    "BatchGenerationProcessor",
 ]

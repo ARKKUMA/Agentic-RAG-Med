@@ -1,6 +1,6 @@
 """
 llm_generator.py — 本地 LLM 集成与生成（Ollama）
-封装 Ollama HTTP API：连接检测、单条生成（含 JSON 格式约束与容错提取）、批量生成。
+封装 Ollama HTTP API：连接检测、单条生成（含 JSON 格式约束与容错提取、可选缓存）、批量生成。
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ import re
 import time
 
 import requests
+
+from .cache import GenerationCache
 
 DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL = "qwen2.5:7b-instruct"
@@ -25,6 +27,8 @@ class LLMGenerator:
         model_name: Ollama 模型名称
         base_url: Ollama 服务地址
         timeout: 请求超时时间（秒）
+        cache: 可选的 GenerationCache 实例；传入后对低温（确定性）调用自动
+               读写缓存，高温调用直接跳过缓存（详见 cache.py 模块说明）
     """
 
     def __init__(
@@ -33,11 +37,13 @@ class LLMGenerator:
         base_url: str = DEFAULT_BASE_URL,
         timeout: int = DEFAULT_TIMEOUT,
         log: logging.Logger | None = None,
+        cache: GenerationCache | None = None,
     ):
         self.model_name = model_name
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.log = log or logging.getLogger("llm_generator")
+        self.cache = cache
         self._check_connection()
 
     # ── 初始化并测试连接 ──────────────────────────────────────────
@@ -99,12 +105,30 @@ class LLMGenerator:
         require_json: bool = False,
     ) -> dict:
         """
-        调用 Ollama /api/generate 生成文本。
+        调用 Ollama /api/generate 生成文本；若配置了 cache 且 temperature 足够低，
+        优先查缓存命中（结果附加 "cached": True），否则调用模型并按规则写入缓存。
 
         Returns:
             {"text": str, "elapsed_seconds": float, "model": str, "done": bool,
-             "json": dict | None}  （json 字段仅在 require_json=True 时存在）
+             "cached": bool, "json": dict | None}
+             （json 字段仅在 require_json=True 时存在）
         """
+        use_cache = self.cache is not None and self.cache.is_cacheable_temperature(temperature)
+        cache_key = None
+        if use_cache:
+            cache_key = self.cache.make_key(
+                model=self.model_name,
+                system=system_prompt or "",
+                prompt=prompt,
+                temperature=str(temperature),
+                json_mode=str(require_json),
+            )
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                result = dict(cached)
+                result["cached"] = True
+                return result
+
         final_prompt = prompt
         if require_json:
             # Ollama 的 format="json" 约束输出必须是合法 JSON，但部分模型仍需
@@ -134,9 +158,13 @@ class LLMGenerator:
             "elapsed_seconds": round(elapsed, 2),
             "model": self.model_name,
             "done": data.get("done", True),
+            "cached": False,
         }
         if require_json:
             result["json"] = self._extract_json(raw_text)
+
+        if use_cache:
+            self.cache.set(cache_key, result, temperature=temperature)
         return result
 
     # ── 批量生成 ──────────────────────────────────────────────────

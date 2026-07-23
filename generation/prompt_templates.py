@@ -9,7 +9,45 @@ draft_answer / review_feedback）。system_prompt 不参与 format，可放心�
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+
+# 模型（尤其是中文背景较重的本地模型）即使被告知"用提问的语言回答"，也常常默认
+# 切回中文。与其依赖一句混在规则列表里的软性指令，不如显式判断查询语言并在
+# prompt 末尾（指令遵循的"近因效应"位置）注入一条不容忽视的强制指令。
+_CJK_RE = re.compile(r"[一-鿿]")
+
+LANGUAGE_DIRECTIVES: dict[str, str] = {
+    "zh": "【语言要求】请务必全程使用中文撰写回答，不要夹杂大段英文。",
+    "en": "[LANGUAGE REQUIREMENT] Your entire answer MUST be written in English. "
+          "Do not switch to Chinese at any point, even for hedging or asides.",
+}
+
+
+def detect_query_language(query: str) -> str:
+    """粗略判断查询语言：包含中文字符即视为中文，否则视为英文。"""
+    return "zh" if _CJK_RE.search(query) else "en"
+
+
+def language_directive_for(query: str) -> str:
+    """返回与查询语言匹配的强制语言指令，供 answer_generator/final_assembler 使用。"""
+    return LANGUAGE_DIRECTIVES[detect_query_language(query)]
+
+
+# 生成后处理阶段（引用列表标题、免责声明）也按查询语言本地化，
+# 避免固定的中文样板文字混入英文回答，稀释 ROUGE 等文本相似度评估。
+REFERENCES_HEADER: dict[str, str] = {
+    "zh": "\n\n**参考文献：**",
+    "en": "\n\n**References:**",
+}
+
+DISCLAIMERS: dict[str, str] = {
+    "zh": "\n\n---\n*本回答基于已检索的 PMC 文献自动生成，仅供参考，不构成医疗建议。"
+          "具体诊疗请咨询专业医生。*",
+    "en": "\n\n---\n*This answer was automatically generated from retrieved PMC literature "
+          "for reference only and does not constitute medical advice. Please consult a "
+          "qualified physician for actual diagnosis or treatment.*",
+}
 
 
 @dataclass
@@ -70,15 +108,19 @@ MEDICAL_PROMPT_STAGES: dict[str, PromptStage] = {
             "2. Cite the source for every factual claim using its bracket number, e.g. [来源 2].\n"
             "3. If the sources are insufficient or conflicting, say so explicitly rather than "
             "guessing.\n"
-            "4. Respond in the same language the question was asked in (Chinese question -> "
-            "Chinese answer; English question -> English answer).\n"
+            "4. Language is mandatory, not optional: respond in the same language as the "
+            "question. If the question is in English, your ENTIRE answer must be in English "
+            "— do not switch to Chinese partway through, even for reasoning or asides. A "
+            "language requirement will also be given at the end of the user message; follow "
+            "it exactly.\n"
             "5. Be precise and avoid overstating certainty — this is not medical advice."
         ),
         user_prompt_template=(
             "Question: {query}\n\n"
             "Sources:\n{context}\n\n"
             "Write a well-organized answer to the question, citing sources by their "
-            "[来源 N] number for every claim."
+            "[来源 N] number for every claim.\n\n"
+            "{language_directive}"
         ),
         temperature=0.3,
         max_tokens=900,
@@ -129,14 +171,17 @@ MEDICAL_PROMPT_STAGES: dict[str, PromptStage] = {
             "2. Keeps all [来源 N] citation markers accurate.\n"
             "3. Stays strictly grounded in the same sources as the draft — do not invent new "
             "claims.\n"
-            "4. Responds in the same language as the original question.\n"
+            "4. Language is mandatory, not optional: respond in the same language as the "
+            "original question, in full, with no partial switch to Chinese. A language "
+            "requirement will also be given at the end of the user message; follow it exactly.\n"
             "Return plain text only — no JSON, no meta-commentary about the review process."
         ),
         user_prompt_template=(
             "Question: {query}\n\n"
             "Draft answer:\n{draft_answer}\n\n"
             "Reviewer feedback (JSON):\n{review_feedback}\n\n"
-            "Write the revised final answer."
+            "Write the revised final answer.\n\n"
+            "{language_directive}"
         ),
         temperature=0.2,
         max_tokens=900,
