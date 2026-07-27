@@ -161,9 +161,13 @@ MEDICAL_PROMPT_STAGES: dict[str, PromptStage] = {
             "— do not switch to Chinese partway through, even for reasoning or asides. A "
             "language requirement will also be given at the end of the user message; follow "
             "it exactly.\n"
-            "5. Be precise and avoid overstating certainty — this is not medical advice."
+            "5. Be precise and avoid overstating certainty — this is not medical advice.\n"
+            "6. If previous conversation turns are provided below, use them only to resolve "
+            "references (e.g. \"it\", \"that drug\") in the current question — they are NOT "
+            "a source of facts and must never be cited or treated as grounding."
         ),
         user_prompt_template=(
+            "{conversation_context}"
             "Question: {query}\n\n"
             "Sources:\n{context}\n\n"
             "Write a well-organized answer to the question, citing sources by their "

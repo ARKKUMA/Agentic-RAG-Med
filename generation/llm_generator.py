@@ -167,6 +167,43 @@ class LLMGenerator:
             self.cache.set(cache_key, result, temperature=temperature)
         return result
 
+    # ── 流式生成 ──────────────────────────────────────────────────
+    def generate_stream(
+        self,
+        prompt: str,
+        system_prompt: str | None = None,
+        temperature: float = 0.3,
+        max_tokens: int = 900,
+    ):
+        """
+        调用 Ollama /api/generate（stream=True），逐 token yield 文本片段。
+        不接入缓存——流式场景本身就是为了实时展示生成过程，命中缓存会导致
+        "整段文字瞬间出现"而非逐字流出，违背流式接口的初衷；且流式通常用于
+        高温（创造性）的 answer_generator 阶段，本就不满足缓存的温度门控条件。
+        """
+        payload: dict = {
+            "model": self.model_name,
+            "prompt": prompt,
+            "stream": True,
+            "options": {"temperature": temperature, "num_predict": max_tokens},
+        }
+        if system_prompt:
+            payload["system"] = system_prompt
+
+        with requests.post(
+            f"{self.base_url}/api/generate", json=payload, timeout=self.timeout, stream=True,
+        ) as resp:
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if not line:
+                    continue
+                data = json.loads(line)
+                chunk = data.get("response", "")
+                if chunk:
+                    yield chunk
+                if data.get("done"):
+                    break
+
     # ── 批量生成 ──────────────────────────────────────────────────
     def generate_batch(self, requests_list: list[dict]) -> list[dict]:
         """

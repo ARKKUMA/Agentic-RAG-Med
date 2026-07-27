@@ -95,6 +95,7 @@ class MedicalGenerationPipeline:
         valid_ids: set[int],
         language_directive: str,
         hard_constraints: str,
+        conversation_context: str = "",
     ) -> tuple[str, dict, int]:
         """
         调用 answer_generator 生成草稿，并校验其 [来源 N] 引用是否都落在
@@ -116,6 +117,7 @@ class MedicalGenerationPipeline:
                 query=query, context=context_text or "（未检索到相关文献）",
                 language_directive=language_directive,
                 retry_note=retry_note,
+                conversation_context=conversation_context,
             )
             draft_answer = draft_out["text"].strip()
             validation = self.citation_validator.validate(draft_answer, valid_ids)
@@ -227,10 +229,16 @@ class MedicalGenerationPipeline:
         fusion_strategy: str = "rrf",
         run_evaluation: bool = True,
         run_review: bool = True,
+        conversation_context: str = "",
     ) -> dict:
         """
         执行完整生成流水线：检索 -> 上下文组装 -> 证据评估(可选) -> 答案草稿 ->
         批判性审查(可选) -> 最终组装 -> 后处理。
+
+        Args:
+            conversation_context: 可选的多轮对话历史前缀（由 api/session.py 的
+                SessionManager.build_context_prefix() 渲染），只注入答案生成阶段
+                用于消解指代（"它"/"那个药"），不参与检索、不作为事实依据。
 
         Returns:
             见模块顶部注释描述的 result 结构（query/answer/context_metadata/
@@ -297,6 +305,7 @@ class MedicalGenerationPipeline:
                 valid_ids=valid_citation_ids,
                 language_directive=language_directive,
                 hard_constraints=hard_constraints,
+                conversation_context=conversation_context,
             )
             stage_success["answer_generation"] = bool(draft_answer)
             token_counts["draft_answer"] = self.context_assembler.estimate_tokens(draft_answer)
@@ -381,3 +390,172 @@ class MedicalGenerationPipeline:
         }
         self._log_run(result)
         return result
+
+    # ── 流式主入口 ────────────────────────────────────────────────
+    def generate_stream(
+        self,
+        query: str,
+        top_k: int = 8,
+        fusion_strategy: str = "rrf",
+        run_evaluation: bool = True,
+        run_review: bool = True,
+        conversation_context: str = "",
+    ):
+        """
+        流式版本：检索/上下文组装/证据评估同步完成后，逐 token yield 答案草稿文本；
+        批判性审查与最终组装仍同步执行（内部质量控制步骤，是结构化 JSON 或对草稿的
+        整体重写，不适合逐字展示），完成后 yield 一个 "done" 事件，携带与 generate()
+        完全一致结构的最终结果，供调用方落库/统计。
+
+        与 generate() 的行为差异：流式路径跳过引用校验重试循环（重试需要整段重新
+        生成，与"边生成边显示"的体验冲突），引用正确性改由末尾的兜底 strip 安全网
+        保证——代价是放弃了非流式路径下"反馈错误后重新生成"的主动修正能力。
+
+        Yields:
+            {"event": "status", "stage": str}
+            {"event": "token", "text": str}
+            {"event": "done", "result": dict}   # result 结构与 generate() 返回值一致
+            {"event": "error", "message": str}
+        """
+        t_start = time.time()
+        stage_times: dict[str, float] = {}
+        stage_success: dict[str, bool] = {}
+        token_counts: dict[str, int] = {}
+        query_language = detect_query_language(query)
+        language_directive = LANGUAGE_DIRECTIVES[query_language]
+        hard_constraints = build_hard_constraints(query_language)
+
+        try:
+            yield {"event": "status", "stage": "retrieving"}
+            t0 = time.time()
+            retrieval_out = self.retrieval_pipeline.retrieve(query, top_k=top_k, fusion_strategy=fusion_strategy)
+            stage_times["retrieval"] = round(time.time() - t0, 2)
+
+            t0 = time.time()
+            context_result = self.context_assembler.assemble(retrieval_out["results"], query=query)
+            stage_times["context_assembly"] = round(time.time() - t0, 2)
+            token_counts["context"] = context_result["metadata"]["estimated_tokens"]
+            context_text = context_result["context_text"]
+            selected_chunks = context_result["selected_chunks"]
+
+            evaluation_json = None
+            if run_evaluation and context_text:
+                yield {"event": "status", "stage": "evaluating_evidence"}
+                t0 = time.time()
+                try:
+                    eval_out = self._run_stage(
+                        "evidence_evaluator", require_json=True, query=query, context=context_text,
+                    )
+                    evaluation_json = eval_out.get("json")
+                    stage_success["evidence_evaluation"] = evaluation_json is not None
+                    token_counts["evidence_evaluation"] = self.context_assembler.estimate_tokens(eval_out["text"])
+                except Exception as e:
+                    self.log.warning(f"证据评估阶段失败：{e}")
+                    stage_success["evidence_evaluation"] = False
+                stage_times["evidence_evaluation"] = round(time.time() - t0, 2)
+                context_text, selected_chunks = self._filter_context_by_evaluation(
+                    context_text, selected_chunks, evaluation_json
+                )
+
+            valid_citation_ids = {
+                c.metadata.get("_citation_id") for c in selected_chunks
+                if c.metadata.get("_citation_id") is not None
+            }
+
+            # 流式答案生成
+            yield {"event": "status", "stage": "generating"}
+            t0 = time.time()
+            stage = self.stages["answer_generator"]
+            prompt = stage.user_prompt_template.format(
+                query=query, context=context_text or "（未检索到相关文献）",
+                language_directive=language_directive, retry_note="",
+                conversation_context=conversation_context,
+            )
+            system_prompt = f"{hard_constraints}\n\n{stage.system_prompt}"
+            draft_answer = ""
+            for chunk in self.llm.generate_stream(
+                prompt=prompt, system_prompt=system_prompt,
+                temperature=stage.temperature, max_tokens=stage.max_tokens,
+            ):
+                draft_answer += chunk
+                yield {"event": "token", "text": chunk}
+            draft_answer = draft_answer.strip()
+            stage_success["answer_generation"] = bool(draft_answer)
+            token_counts["draft_answer"] = self.context_assembler.estimate_tokens(draft_answer)
+            stage_times["answer_generation"] = round(time.time() - t0, 2)
+
+            citation_validation = self.citation_validator.validate(draft_answer, valid_citation_ids)
+
+            # 批判性审查（可选，同步）
+            review_json = None
+            if run_review and draft_answer:
+                yield {"event": "status", "stage": "reviewing"}
+                t0 = time.time()
+                try:
+                    review_out = self._run_stage(
+                        "critical_reviewer", require_json=True,
+                        query=query, context=context_text, draft_answer=draft_answer,
+                    )
+                    review_json = review_out.get("json")
+                    stage_success["critical_review"] = review_json is not None
+                    token_counts["critical_review"] = self.context_assembler.estimate_tokens(review_out["text"])
+                except Exception as e:
+                    self.log.warning(f"批判性审查阶段失败：{e}")
+                    stage_success["critical_review"] = False
+                stage_times["critical_review"] = round(time.time() - t0, 2)
+
+            t0 = time.time()
+            final_answer = draft_answer
+            if review_json:
+                if review_json.get("overall_verdict") == "revise":
+                    yield {"event": "status", "stage": "finalizing"}
+                    try:
+                        final_out = self._run_stage(
+                            "final_assembler", require_json=False,
+                            extra_system_prompt=hard_constraints,
+                            query=query, draft_answer=draft_answer,
+                            review_feedback=json.dumps(review_json, ensure_ascii=False),
+                            language_directive=language_directive,
+                        )
+                        final_answer = final_out["text"].strip() or draft_answer
+                        stage_success["final_assembly"] = True
+                    except Exception as e:
+                        self.log.warning(f"最终组装阶段失败，回退使用草稿：{e}")
+                        stage_success["final_assembly"] = False
+                else:
+                    stage_success["final_assembly"] = True
+            else:
+                stage_success["final_assembly"] = False
+            stage_times["final_assembly"] = round(time.time() - t0, 2)
+            token_counts["final_answer"] = self.context_assembler.estimate_tokens(final_answer)
+
+            final_answer = self.citation_validator.strip_invalid_citations(final_answer, valid_citation_ids)
+            final_answer = self._postprocess(final_answer, selected_chunks, language=query_language)
+            format_check = self.format_checker.check(final_answer, language=query_language)
+
+            result = {
+                "query": query,
+                "answer": final_answer,
+                "context_metadata": context_result["metadata"],
+                "format_check": format_check,
+                "generation_metrics": {
+                    "total_time_seconds": round(time.time() - t_start, 2),
+                    "stage_times": stage_times,
+                    "token_counts": token_counts,
+                    "citation_retry_attempts": 0,  # 流式路径不做重试循环，见上方说明
+                    "stage_success": stage_success,
+                },
+                "intermediate_results": {
+                    "evidence_evaluation": evaluation_json,
+                    "draft_answer": draft_answer,
+                    "review_feedback": review_json,
+                    "citation_validation": citation_validation,
+                },
+                "sources": self._format_sources(selected_chunks),
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            self._log_run(result)
+            yield {"event": "done", "result": result}
+        except Exception as e:
+            self.log.error(f"流式生成失败：{e}")
+            yield {"event": "error", "message": str(e)}
