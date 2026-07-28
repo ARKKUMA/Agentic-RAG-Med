@@ -8,9 +8,11 @@
 $env:PYTHONUTF8="1"; uvicorn api.main:app --host 0.0.0.0 --port 8000
 ```
 
-首次启动需加载 BGE 嵌入模型、ChromaDB 索引、重排序模型并连接 Ollama，耗时约 8-15 秒；启动完成前 `/health` 会返回 `ready: false`。
+首次启动需加载 BGE 嵌入模型、ChromaDB 索引、重排序模型、连接 Ollama，并扫描一次集合构建文档级索引，耗时约 8-15 秒；启动完成前 `/health` 会返回 `ready: false`。
 
-可选环境变量（均有默认值，默认指向小规模 `test_dir_mode` 测试集合）：
+### 环境变量配置（.env）
+
+复制 [.env.example](.env.example) 为 `.env` 并按需修改（`.env` 已加入 `.gitignore`，不会被提交）。配置通过 `api/config.py` 的 `pydantic-settings` 读取，真实环境变量优先级高于 `.env` 文件。
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
@@ -18,8 +20,23 @@ $env:PYTHONUTF8="1"; uvicorn api.main:app --host 0.0.0.0 --port 8000
 | `RAG_COLLECTION` | `test_dir_mode` | 检索用的 ChromaDB 集合名 |
 | `RAG_BM25_CACHE` | `.../bm25_index_test_dir_mode.pkl` | BM25 索引 pickle 缓存路径 |
 | `RAG_LLM_MODEL` | `qwen2.5:7b-instruct` | Ollama 模型名称 |
+| `RAG_LLM_BASE_URL` | `http://localhost:11434` | Ollama 服务地址 |
+| `API_HOST` | `0.0.0.0` | 服务监听地址 |
+| `API_PORT` | `8000` | 服务监听端口 |
+| `SESSION_TTL_SECONDS` | `3600` | 会话过期时间（秒） |
+| `SESSION_MAX_TURNS` | `20` | 单会话最多保留对话轮数 |
 
 **注意：** 若把 `RAG_COLLECTION` 指向全量 `pmc_full` 集合，加载 HNSW 索引会占用约 18-21GB 内存，请确认机器内存充足（详见 README"已知限制"）。
+
+### 交互式文档 / OpenAPI
+
+服务启动后自动提供：
+
+- Swagger UI：`http://127.0.0.1:8000/docs`
+- ReDoc：`http://127.0.0.1:8000/redoc`
+- OpenAPI schema：`http://127.0.0.1:8000/openapi.json`（项目根目录的 [openapi.json](openapi.json) 是同一份 schema 的静态快照）
+
+也可以直接导入 [postman_collection.json](postman_collection.json) 到 Postman，覆盖本文档下方全部端点，并带有基础断言（`pm.test`）——先运行 "Sessions > Create Session" 会自动把返回的 `session_id` 存进 collection variable，供后续请求复用。
 
 ## 通用约定
 
@@ -197,12 +214,32 @@ with requests.post(
 
 ---
 
-## GET /api/v1/qa/sessions/{session_id} — 查看会话历史
+## 会话管理接口
 
-用于调试/前端展示当前会话已保存的历史轮次（调用方一般不需要手动请求此接口，仅用于排查会话状态）。
+会话状态保存在服务进程内存中（服务重启即丢失），单会话最多保留 20 轮，默认 1 小时无活动即过期。"添加消息"没有独立接口——由 `POST /api/v1/qa`（同步/流式均可）在生成完成后自动调用，不需要调用方手动维护。
+
+### POST /api/v1/sessions — 创建会话
 
 ```bash
-curl http://127.0.0.1:8000/api/v1/qa/sessions/test-session-001
+curl -X POST http://127.0.0.1:8000/api/v1/sessions
+```
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {"session_id": "3ea10b371dcc459ca59dba038a893ccf", "created_at": 1785233756.53},
+  "request_id": "...",
+  "timestamp": "2026-07-28 11:15:56"
+}
+```
+
+调用方也可以不预先创建，直接在 `POST /api/v1/qa` 里传入任意自选的 `session_id` 字符串——服务端会在第一次问答时自动建立该会话（见下方"会话管理说明"）。
+
+### GET /api/v1/sessions/{session_id} — 获取会话信息（历史消息列表）
+
+```bash
+curl http://127.0.0.1:8000/api/v1/sessions/3ea10b371dcc459ca59dba038a893ccf
 ```
 
 ```json
@@ -210,26 +247,142 @@ curl http://127.0.0.1:8000/api/v1/qa/sessions/test-session-001
   "code": 0,
   "message": "success",
   "data": {
-    "session_id": "test-session-001",
+    "session_id": "3ea10b371dcc459ca59dba038a893ccf",
+    "created_at": 1785233756.53,
+    "last_active": 1785233970.26,
+    "turn_count": 1,
     "turns": [
-      {"query": "What does GWAS mean?", "answer": "## Core Answer\n...", "timestamp": 1785150187.74}
+      {"query": "What does GWAS mean?", "answer": "## Core Answer\n...", "timestamp": 1785233970.26}
     ]
   },
   "request_id": "...",
-  "timestamp": "2026-07-27 12:03:07"
+  "timestamp": "2026-07-28 11:19:13"
 }
 ```
 
-会话不存在或已过期（默认 1 小时无活动过期）时返回 `3002`（HTTP 404）。
+会话不存在或已过期时返回 `3002`（HTTP 404）。
+
+### DELETE /api/v1/sessions/{session_id} — 删除会话
+
+```bash
+curl -X DELETE http://127.0.0.1:8000/api/v1/sessions/3ea10b371dcc459ca59dba038a893ccf
+```
+
+```json
+{"code": 0, "message": "success", "data": {"session_id": "...", "deleted": true}, "request_id": "...", "timestamp": "..."}
+```
+
+会话不存在时同样返回 `3002`（HTTP 404），删除操作是幂等的（重复删除同一个已不存在的会话，两次都会得到 404，而不是第二次"假装成功"）。
+
+### 会话管理说明
+
+1. 首次提问时可以先调用 `POST /api/v1/sessions` 拿到 `session_id`，也可以自己生成任意唯一字符串直接使用（服务端不做格式校验）。
+2. 后续追问传入相同 `session_id`，服务会自动把最近 3 轮对话渲染成简短上下文，**仅用于消解指代**（如"它"、"那个药"指代上一轮提到的实体），**不会**作为检索依据或事实来源——每轮提问的检索仍然只使用当前这一句 `query`。
+3. `session_id` 不存在或已过期时，同步/流式问答接口**不会报错**，会按新会话继续处理（只有 `GET`/`DELETE /sessions/{id}` 才会返回 404）。
 
 ---
 
-## 会话管理说明
+## GET /api/v1/stats — 运营统计
 
-1. 首次提问时自行生成一个 `session_id`（任意唯一字符串即可，服务端不做格式校验）并传入请求体。
-2. 后续追问传入相同 `session_id`，服务会自动把最近 3 轮对话渲染成简短上下文，**仅用于消解指代**（如"它"、"那个药"指代上一轮提到的实体），**不会**作为检索依据或事实来源——每轮提问的检索仍然只使用当前这一句 `query`。
-3. 会话状态保存在服务进程内存中，服务重启即丢失；单会话最多保留 20 轮，超出自动淘汰最旧的。
-4. `session_id` 不存在或已过期时，同步/流式问答接口**不会报错**，会按新会话继续处理（只有 `GET /sessions/{id}` 查询历史时才会返回 404）。
+问答调用次数/平均耗时/成功率、语料规模、各组件（LLM / 向量库 / "数据库"）健康状态。适合监控面板轮询。
+
+```bash
+curl http://127.0.0.1:8000/api/v1/stats
+```
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "qa": {
+      "total_calls": 12,
+      "success_count": 11,
+      "failure_count": 1,
+      "success_rate": 0.9167,
+      "avg_latency_seconds": 14.32
+    },
+    "corpus": {
+      "total_documents": 99,
+      "total_chunks": 1854,
+      "index_size_bytes": null,
+      "incremental_update_count": 0
+    },
+    "components": [
+      {"name": "llm", "status": "ok", "detail": "Ollama 可达，已拉取模型数=1", "latency_seconds": 0.02},
+      {"name": "vector_store", "status": "ok", "detail": "ChromaDB 集合 test_dir_mode 向量数=1,854", "latency_seconds": 0.001},
+      {"name": "database", "status": "ok", "detail": "BM25 关键词索引文档数=1,854（会话存储为进程内内存，非持久化数据库）", "latency_seconds": 0.0}
+    ],
+    "active_sessions": 2
+  },
+  "request_id": "...",
+  "timestamp": "..."
+}
+```
+
+字段说明：
+
+| 字段 | 说明 |
+|---|---|
+| `qa.*` | `POST /api/v1/qa`（同步+流式）调用计数，服务启动后累计，重启清零 |
+| `corpus.total_documents` / `total_chunks` | 当前集合的文档数/chunk 数（启动时扫描一次得到） |
+| `corpus.incremental_update_count` | **预留字段，当前恒为 0**——本版本文档接口只读，尚无写入/更新入口驱动此计数 |
+| `components` | `llm`（Ollama 连通性）、`vector_store`（ChromaDB）、`database`（本系统用 BM25 关键词索引承担该角色；没有独立关系型数据库，会话数据是进程内内存，非持久化） |
+| `components[].status` | `ok` / `degraded`（可用但异常，如索引为空）/ `down`（不可达） |
+
+---
+
+## 文档管理接口（只读）
+
+### GET /api/v1/documents — 文档列表查询
+
+按 `doc_id` 聚合的文档级视图（分页），标题/摘要/期刊/年份等元数据取自该文档的摘要类 chunk。
+
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `page` | int | 1 | 页码，从 1 开始 |
+| `page_size` | int | 20 | 每页数量，1-100 |
+
+```bash
+curl "http://127.0.0.1:8000/api/v1/documents?page=1&page_size=10"
+```
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "items": [
+      {
+        "doc_id": "PMC176545",
+        "title": "The Transcriptome of the Intraerythrocytic Developmental Cycle of Plasmodium falciparum",
+        "abstract": "...",
+        "journal": "PLoS Biology",
+        "pub_date": "2003",
+        "pmid": "12929205",
+        "doi": "10.1371/journal.pbio.0000005",
+        "article_type": "research-article",
+        "chunk_count": 58
+      }
+    ],
+    "page_info": {"page": 1, "page_size": 10, "total": 99, "total_pages": 10}
+  },
+  "request_id": "...",
+  "timestamp": "..."
+}
+```
+
+### GET /api/v1/documents/{doc_id} — 按 ID 查询单篇文档
+
+```bash
+curl http://127.0.0.1:8000/api/v1/documents/PMC176545
+```
+
+响应 `data` 结构与列表接口的单个 `items` 元素一致。文档不存在时返回 `3001`（HTTP 404）。
+
+### DocumentIn（写入模型，预留）
+
+`api/models.py` 中定义了 `DocumentIn`（`doc_id` / `title` / `abstract` / `journal` / `pub_date` / `pmid` / `doi` / `article_type`），供未来文档录入/更新接口使用。**当前版本尚未开放写入接口**，文档数据只能通过重新运行 `pmc_document_splitter.py` + `pmc_vector_index.py` 离线流水线写入 ChromaDB，再重启服务触发文档索引重建。
 
 ## 完整调用示例（多轮对话）
 
@@ -250,3 +403,19 @@ def ask(query):
 print(ask("What does GWAS mean?"))
 print(ask("Is it used in the diabetes gene studies you have access to?"))  # "it" 会被正确解析为 GWAS
 ```
+
+---
+
+## 测试
+
+`tests/test_api.py` 是基于标准库 `unittest` + FastAPI `TestClient` 的单元/集成测试，覆盖本文档列出的全部端点（含参数校验、错误路径、会话完整生命周期、真实调用生成流水线的 smoke test）：
+
+```powershell
+$env:PYTHONUTF8="1"; python -m unittest tests.test_api -v
+```
+
+RAG 流水线通过 `setUpModule`/`tearDownModule` 在整个测试文件范围内只加载一次；真正触发 LLM 生成的用例数量刻意控制得很少（同步/流式各一个端到端用例 + 会话生命周期里的一次问答），其余校验/错误路径测试在到达生成阶段前就被拒绝，不产生实际 LLM 调用。完整运行一次约 40-50 秒（含约 7-10 秒的一次性模型加载）。
+
+也可以导入 [postman_collection.json](postman_collection.json) 用 Postman 手动/半自动测试，见上文"交互式文档 / OpenAPI"一节。
+
+部署相关内容见 [DEPLOYMENT.md](DEPLOYMENT.md)。

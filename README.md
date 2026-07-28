@@ -4,7 +4,7 @@
 
 > **本仓库只包含源码。** `data/`、`pipeline_output/`、`logs/` 均已 `.gitignore`（原始清单、切分产出、ChromaDB、embedding、BM25 索引等体积巨大，单机上就有上百 GB），需要按下文"快速开始"重新生成。
 
-> 已封装为 FastAPI 服务（`api/`），接口调用说明见 [API.md](API.md)。
+> 已封装为 FastAPI 服务（`api/`），接口调用说明见 [API.md](API.md)，部署说明见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
 ## 目录结构
 

@@ -77,4 +77,83 @@ class SessionHistoryTurn(BaseModel):
 
 class SessionHistoryData(BaseModel):
     session_id: str
+    created_at: float
+    last_active: float
+    turn_count: int
     turns: list[SessionHistoryTurn]
+
+
+# ══════════════════════════════════════════════════════════════════
+# 会话管理接口
+# ══════════════════════════════════════════════════════════════════
+
+class SessionCreateData(BaseModel):
+    session_id: str
+    created_at: float
+
+
+class SessionDeleteData(BaseModel):
+    session_id: str
+    deleted: bool
+
+
+# ══════════════════════════════════════════════════════════════════
+# 运营统计接口
+# ══════════════════════════════════════════════════════════════════
+
+class QAStatsData(BaseModel):
+    total_calls: int
+    success_count: int
+    failure_count: int
+    success_rate: float
+    avg_latency_seconds: float
+
+
+class CorpusStatsData(BaseModel):
+    total_documents: int
+    total_chunks: int
+    index_size_bytes: int | None = None
+    incremental_update_count: int
+
+
+class ComponentHealthItem(BaseModel):
+    name: str
+    status: Literal["ok", "degraded", "down"]
+    detail: str | None = None
+    latency_seconds: float | None = None
+
+
+class OperationalStatsData(BaseModel):
+    qa: QAStatsData
+    corpus: CorpusStatsData
+    components: list[ComponentHealthItem]
+    active_sessions: int
+
+
+# ══════════════════════════════════════════════════════════════════
+# 文档管理接口
+# ══════════════════════════════════════════════════════════════════
+
+class DocumentIn(BaseModel):
+    """文档写入模型（供未来文档录入/更新接口使用；当前 Part 2 仅开放只读查询）。"""
+
+    doc_id: str = Field(..., description="文档唯一标识，对应 PMC ID")
+    title: str = Field(..., description="文章标题")
+    abstract: str | None = Field(default=None, description="摘要")
+    journal: str | None = Field(default=None, description="期刊名称")
+    pub_date: str | None = Field(default=None, description="发表日期/年份")
+    pmid: str | None = Field(default=None, description="PubMed ID")
+    doi: str | None = Field(default=None, description="DOI")
+    article_type: str | None = Field(default=None, description="文章类型")
+
+
+class DocumentOut(BaseModel):
+    doc_id: str
+    title: str
+    abstract: str | None = None
+    journal: str | None = None
+    pub_date: str | None = None
+    pmid: str | None = None
+    doi: str | None = None
+    article_type: str | None = None
+    chunk_count: int

@@ -1,0 +1,340 @@
+{
+  "info": {
+    "name": "PMC Medical RAG API",
+    "description": "PMC 医学文献 RAG 服务全部端点的 Postman 集合。导入后设置 collection variable base_url（默认 http://127.0.0.1:8000），先跑 Sessions > Create Session 会自动把 session_id 存进变量供后续请求复用。",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://127.0.0.1:8000" },
+    { "key": "session_id", "value": "" },
+    { "key": "sample_doc_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/health", "host": ["{{base_url}}"], "path": ["health"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('code is 0', () => pm.response.json().code === 0);",
+                  "pm.test('ready is true', () => pm.response.json().data.ready === true);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "QA",
+      "item": [
+        {
+          "name": "Sync QA",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/qa", "host": ["{{base_url}}"], "path": ["api", "v1", "qa"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"What genes have been associated with susceptibility to type 2 diabetes?\",\n  \"top_k\": 6,\n  \"fusion_strategy\": \"rrf\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('code is 0', () => body.code === 0);",
+                  "pm.test('answer present', () => typeof body.data.answer === 'string' && body.data.answer.length > 0);",
+                  "pm.test('sources is array', () => Array.isArray(body.data.sources));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Sync QA (with session)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/qa", "host": ["{{base_url}}"], "path": ["api", "v1", "qa"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"What does GWAS mean?\",\n  \"top_k\": 4,\n  \"session_id\": \"{{session_id}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('session_id echoed back', () => pm.response.json().data.session_id === pm.collectionVariables.get('session_id'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Streaming QA (SSE)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/qa/stream", "host": ["{{base_url}}"], "path": ["api", "v1", "qa", "stream"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"query\": \"What statistical methods are used to analyze survival data in cancer studies?\",\n  \"top_k\": 5\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('content-type is text/event-stream', () => pm.response.headers.get('Content-Type').includes('text/event-stream'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Invalid: empty query (expect 422 / code 1001)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/qa", "host": ["{{base_url}}"], "path": ["api", "v1", "qa"] },
+            "body": { "mode": "raw", "raw": "{\n  \"query\": \"\"\n}" }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 422', () => pm.response.to.have.status(422));",
+                  "pm.test('code is 1001', () => pm.response.json().code === 1001);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Invalid: top_k out of range (expect 422 / code 1001)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/v1/qa", "host": ["{{base_url}}"], "path": ["api", "v1", "qa"] },
+            "body": { "mode": "raw", "raw": "{\n  \"query\": \"test\",\n  \"top_k\": 999\n}" }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 422', () => pm.response.to.have.status(422));",
+                  "pm.test('code is 1001', () => pm.response.json().code === 1001);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Sessions",
+      "item": [
+        {
+          "name": "Create Session",
+          "request": {
+            "method": "POST",
+            "url": { "raw": "{{base_url}}/api/v1/sessions", "host": ["{{base_url}}"], "path": ["api", "v1", "sessions"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('session_id present', () => typeof body.data.session_id === 'string' && body.data.session_id.length > 0);",
+                  "pm.collectionVariables.set('session_id', body.data.session_id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Session Info",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/sessions/{{session_id}}",
+              "host": ["{{base_url}}"], "path": ["api", "v1", "sessions", "{{session_id}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('turns is array', () => Array.isArray(pm.response.json().data.turns));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Nonexistent Session (expect 404 / code 3002)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/sessions/does-not-exist",
+              "host": ["{{base_url}}"], "path": ["api", "v1", "sessions", "does-not-exist"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));",
+                  "pm.test('code is 3002', () => pm.response.json().code === 3002);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Delete Session",
+          "request": {
+            "method": "DELETE",
+            "url": {
+              "raw": "{{base_url}}/api/v1/sessions/{{session_id}}",
+              "host": ["{{base_url}}"], "path": ["api", "v1", "sessions", "{{session_id}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('deleted is true', () => pm.response.json().data.deleted === true);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Stats",
+      "item": [
+        {
+          "name": "Get Operational Stats",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/api/v1/stats", "host": ["{{base_url}}"], "path": ["api", "v1", "stats"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const data = pm.response.json().data;",
+                  "pm.test('has qa/corpus/components', () => data.qa && data.corpus && Array.isArray(data.components));",
+                  "pm.test('3 components reported', () => data.components.length === 3);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Documents",
+      "item": [
+        {
+          "name": "List Documents",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents?page=1&page_size=10",
+              "host": ["{{base_url}}"], "path": ["api", "v1", "documents"],
+              "query": [{ "key": "page", "value": "1" }, { "key": "page_size", "value": "10" }]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const data = pm.response.json().data;",
+                  "pm.test('items is array', () => Array.isArray(data.items));",
+                  "pm.test('page_info present', () => !!data.page_info);",
+                  "if (data.items.length > 0) { pm.collectionVariables.set('sample_doc_id', data.items[0].doc_id); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Document by ID",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents/{{sample_doc_id}}",
+              "host": ["{{base_url}}"], "path": ["api", "v1", "documents", "{{sample_doc_id}}"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('doc_id matches', () => pm.response.json().data.doc_id === pm.collectionVariables.get('sample_doc_id'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Nonexistent Document (expect 404 / code 3001)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/v1/documents/PMC_DOES_NOT_EXIST",
+              "host": ["{{base_url}}"], "path": ["api", "v1", "documents", "PMC_DOES_NOT_EXIST"]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));",
+                  "pm.test('code is 3001', () => pm.response.json().code === 3001);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
