@@ -6,6 +6,8 @@
 
 > 已封装为 FastAPI 服务（`api/`），接口调用说明见 [API.md](API.md)，部署说明见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
+> 面向多跳检索/多工具场景的 Agentic 架构设计（尚未实现，仅边界定义）见 [AGENT_ARCHITECTURE.md](AGENT_ARCHITECTURE.md)，对应类型定义在 [`agent/`](agent/)。
+
 ## 目录结构
 
 ```
@@ -19,12 +21,17 @@ Rag-Med/
 │
 ├── retrieval/                  # 检索模块（详见下文）
 ├── generation/                 # 生成模块（详见下文）
+├── api/                        # FastAPI 服务层（问答/会话/统计/文档接口，见 API.md）
+├── agent/                      # Agentic RAG 架构边界定义（State + 组件接口，尚无执行逻辑，见 AGENT_ARCHITECTURE.md）
 │
+├── tests/                      # API 服务层单元/集成测试（unittest + TestClient）
 ├── test_query_processor.py     # 查询理解模块测试
 ├── test_retrieval_pipeline.py  # 检索流水线测试（小规模 test_dir_mode 集合）
 ├── test_retrieval_pipeline_full.py  # 检索流水线测试（全量 pmc_full 集合，内存开销大）
 ├── test_embedding.py           # 嵌入模型测试
 ├── test_generation_pipeline.py # 生成流水线端到端测试
+├── test_evaluation_cache_batch.py   # 答案评估/缓存/批量处理测试
+├── test_hard_constraints.py    # 强约束/幻觉抑制对抗测试
 │
 ├── utils/                      # 数据获取/分析辅助脚本
 ├── legacy/                     # 已被取代但保留存档的旧版本代码
@@ -33,6 +40,10 @@ Rag-Med/
 ├── data/                       # 原始清单文件（filelist csv/txt）
 ├── pipeline_output/            # 流水线产出物：chunks、ChromaDB、BM25 索引、日志等
 ├── logs/                       # 各模块运行日志（JSONL + 可读文本）
+│
+├── API.md / DEPLOYMENT.md / AGENT_ARCHITECTURE.md   # 接口/部署/架构设计文档
+├── openapi.json / postman_collection.json           # OpenAPI 快照 / Postman 测试集合
+├── .env.example                # 环境变量模板（真实 .env 已 gitignore）
 └── requirements.txt
 ```
 
