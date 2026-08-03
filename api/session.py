@@ -5,6 +5,11 @@ session.py — 轻量会话管理（SessionManager）
 当前实现为进程内存储（服务重启即丢失）。若需要跨进程/多实例共享或持久化，
 可替换为 Redis/SQLite 后端，对外接口（create_session/get_history/append_turn/
 delete_session/build_context_prefix）保持不变，调用方无需改动。
+
+Agent 模式扩展（本周新增）：ConversationTurn 增加可选的 agent_trace 字段，
+存放该轮对话若由 Agent 模式生成时的完整执行轨迹（agent.state.AgentState
+里 execution_trace 字段的内容）。单轮 RAG 模式调用 append_turn() 时不传
+agent_trace，字段保持 None——原有对话消息存储逻辑与序列化结构完全不受影响。
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ class ConversationTurn:
     query: str
     answer: str
     timestamp: float = field(default_factory=time.time)
+    agent_trace: list[dict] | None = None   # 仅 Agent 模式生成的轮次会填充；RAG 模式恒为 None
 
 
 class SessionManager:
@@ -90,13 +96,41 @@ class SessionManager:
                 "turns": history,
             }
 
+    # ── Agent 执行轨迹查询 ────────────────────────────────────────
+    def get_agent_trace(self, session_id: str, step: str | None = None) -> list[dict]:
+        """
+        取回该会话内所有 Agent 模式轮次的执行轨迹，按轮次顺序展平成一个列表；
+        传入 step（如 "tool_execution"）时只保留该步骤的记录，用于调试/溯源/
+        前端按步骤筛选展示。会话不存在/已过期或没有 Agent 模式轮次时返回空列表。
+        """
+        history = self.get_history(session_id)
+        entries: list[dict] = []
+        for turn in history:
+            if not turn.agent_trace:
+                continue
+            entries.extend(turn.agent_trace)
+        if step is not None:
+            entries = [e for e in entries if e.get("step") == step]
+        return entries
+
     # ── 写入（问答接口自动调用，也支持外部显式调用）──────────────
-    def append_turn(self, session_id: str, query: str, answer: str) -> None:
+    def append_turn(
+        self,
+        session_id: str,
+        query: str,
+        answer: str,
+        agent_trace: list[dict] | None = None,
+    ) -> None:
+        """
+        agent_trace：仅 Agent 模式需要传入（该轮的完整执行轨迹）。RAG 模式
+        调用方（api/routers/qa.py 现有代码）不传这个参数，行为与扩展前完全
+        一致——新增参数是可选的，不破坏任何现有调用。
+        """
         now = time.time()
         with self._lock:
             turns = self._sessions.setdefault(session_id, [])
             self._created_at.setdefault(session_id, now)
-            turns.append(ConversationTurn(query=query, answer=answer))
+            turns.append(ConversationTurn(query=query, answer=answer, agent_trace=agent_trace))
             if len(turns) > self.max_turns:
                 del turns[: len(turns) - self.max_turns]
             self._last_active[session_id] = now
