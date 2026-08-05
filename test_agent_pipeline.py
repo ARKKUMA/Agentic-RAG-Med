@@ -1,5 +1,5 @@
 """
-test_agent_pipeline.py — Agent 底座真实端到端验证
+test_agent_pipeline.py — Agent 底座真实端到端验证 + 汇总指标
 用真实的 BGE 嵌入模型 / ChromaDB / BM25 / reranker / Ollama 跑一遍完整的
 entry -> tool_execution -> answer_generation -> termination 状态机，
 验证：
@@ -10,17 +10,22 @@ entry -> tool_execution -> answer_generation -> termination 状态机，
      确认 Agent 编排本身没有引入明显的额外开销（unittest 中的
      tests/test_api.py 回归套件已确认原有 RAG 功能本身零改动、零退化，
      这里只比较"新链路"与"旧链路"的耗时量级）
+  5. 汇总多条查询的指标：成功率、各节点平均耗时、检索/工具调用统计、
+     Agent 相对 RAG 的平均开销占比
 
 生成日志：
-  logs/agent_pipeline_run.log    — 人类可读运行日志
-  logs/agent_pipeline.jsonl      — 结构化日志，每条查询一行
+  logs/agent_pipeline_run.log       — 人类可读运行日志
+  logs/agent_pipeline.jsonl         — 结构化日志，每条查询一行
+  logs/agent_pipeline_summary.json  — 汇总指标（本次运行的整体统计）
 """
 
 import json
 import logging
 import os
+import statistics
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -37,6 +42,7 @@ BM25_CACHE = r"d:\Rag-Med\pipeline_output\bm25_index_test_dir_mode.pkl"
 LOG_DIR = Path("d:/Rag-Med/logs")
 TEXT_LOG_PATH = LOG_DIR / "agent_pipeline_run.log"
 JSONL_LOG_PATH = LOG_DIR / "agent_pipeline.jsonl"
+SUMMARY_PATH = LOG_DIR / "agent_pipeline_summary.json"
 
 
 def setup_logging(log_path: Path) -> logging.Logger:
@@ -55,6 +61,7 @@ def setup_logging(log_path: Path) -> logging.Logger:
 log = setup_logging(TEXT_LOG_PATH)
 log.info(f"文本日志：{TEXT_LOG_PATH}")
 log.info(f"JSONL 日志：{JSONL_LOG_PATH}")
+log.info(f"汇总指标：{SUMMARY_PATH}")
 
 log.info("加载 BGE 嵌入模型与 ChromaDB 索引…")
 embedder = BGEEmbedder(device="cpu", log=log)
@@ -90,11 +97,14 @@ rag_pipeline = MedicalGenerationPipeline(retrieval_pipeline=retrieval_pipeline, 
 TEST_QUERIES = [
     "What genes have been associated with susceptibility to type 2 diabetes?",
     "What statistical methods are used to analyze survival data in cancer studies?",
+    "How does learning during the day affect brain activity during sleep?",
+    "What is the role of the Wnt signaling pathway in cancer?",
     "二甲双胍的作用机制是什么？",
 ]
 
 SEP = "=" * 70
 session_id, _ = session_manager.create_session()
+records: list[dict] = []
 
 for query in TEST_QUERIES:
     log.info(SEP)
@@ -106,9 +116,13 @@ for query in TEST_QUERIES:
     result = agent_graph.invoke(initial_state, config={"recursion_limit": 25})
     agent_elapsed = time.time() - t0
 
+    tool_call = result["tool_call_history"][0]
+    node_timings = {t["step"]: t["elapsed_seconds"] for t in result["execution_trace"]}
+
     log.info(f"[Agent 模式] 耗时: {agent_elapsed:.2f}s  状态: {result['execution_status'].value}")
-    log.info(f"[Agent 模式] 检索工具调用: success={result['tool_call_history'][0].success}  "
-             f"n_results={len(result['retrieval_results'])}")
+    log.info(f"[Agent 模式] 各节点耗时: {node_timings}")
+    log.info(f"[Agent 模式] 检索工具调用: success={tool_call.success}  "
+             f"n_results={len(result['retrieval_results'])}  retry_count={tool_call.retry_count}")
     log.info(f"[Agent 模式] 执行轨迹步骤: {[t['step'] for t in result['execution_trace']]}")
     log.info(f"[Agent 模式] 最终答案（前 200 字符）: {result['final_answer'][:200]}")
 
@@ -122,15 +136,21 @@ for query in TEST_QUERIES:
     log.info(f"[RAG 对照] 耗时: {rag_elapsed:.2f}s（run_evaluation=False, run_review=False，"
               f"对应 Agent 模式当前只做检索+单次生成，公平比较同等步骤量级）")
 
+    overhead_pct = round((agent_elapsed - rag_elapsed) / rag_elapsed * 100, 1) if rag_elapsed else None
+
     record = {
         "query": query,
         "agent_elapsed_seconds": round(agent_elapsed, 2),
         "agent_status": result["execution_status"].value,
         "agent_n_retrieval_results": len(result["retrieval_results"]),
-        "agent_tool_call_success": result["tool_call_history"][0].success,
+        "agent_tool_call_success": tool_call.success,
+        "agent_tool_call_retry_count": tool_call.retry_count,
+        "agent_node_timings": node_timings,
         "agent_trace_steps": [t["step"] for t in result["execution_trace"]],
         "rag_elapsed_seconds": round(rag_elapsed, 2),
+        "overhead_pct_vs_rag": overhead_pct,
     }
+    records.append(record)
     with JSONL_LOG_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -144,5 +164,63 @@ log.info(f"get_agent_trace() 展平后共 {len(all_trace_steps)} 条记录")
 tool_exec_only = session_manager.get_agent_trace(session_id, step="tool_execution")
 log.info(f"按 step='tool_execution' 筛选后共 {len(tool_exec_only)} 条记录")
 
+# ══════════════════════════════════════════════════════════════════
+# 汇总指标
+# ══════════════════════════════════════════════════════════════════
 log.info(SEP)
-log.info("完成：Agent 底座真实端到端验证结束。")
+log.info("汇总指标")
+log.info(SEP)
+
+n = len(records)
+n_success = sum(1 for r in records if r["agent_status"] == "done")
+n_tool_success = sum(1 for r in records if r["agent_tool_call_success"])
+total_retries = sum(r["agent_tool_call_retry_count"] for r in records)
+
+agent_times = [r["agent_elapsed_seconds"] for r in records]
+rag_times = [r["rag_elapsed_seconds"] for r in records]
+overheads = [r["overhead_pct_vs_rag"] for r in records if r["overhead_pct_vs_rag"] is not None]
+
+# 各节点平均耗时（跨全部查询）
+per_node: dict[str, list[float]] = defaultdict(list)
+for r in records:
+    for step, elapsed in r["agent_node_timings"].items():
+        per_node[step].append(elapsed)
+per_node_avg = {step: round(statistics.mean(vals), 4) for step, vals in per_node.items()}
+
+summary = {
+    "n_queries": n,
+    "agent_success_rate": round(n_success / n, 4) if n else 0.0,
+    "tool_call_success_rate": round(n_tool_success / n, 4) if n else 0.0,
+    "total_tool_retries": total_retries,
+    "avg_n_retrieval_results": round(statistics.mean(r["agent_n_retrieval_results"] for r in records), 2) if n else 0,
+    "agent_time_seconds": {
+        "avg": round(statistics.mean(agent_times), 2),
+        "min": round(min(agent_times), 2),
+        "max": round(max(agent_times), 2),
+    },
+    "rag_time_seconds": {
+        "avg": round(statistics.mean(rag_times), 2),
+        "min": round(min(rag_times), 2),
+        "max": round(max(rag_times), 2),
+    },
+    "avg_overhead_pct_vs_rag": round(statistics.mean(overheads), 1) if overheads else None,
+    "per_node_avg_seconds": per_node_avg,
+}
+
+log.info(f"查询总数: {summary['n_queries']}")
+log.info(f"Agent 执行成功率: {summary['agent_success_rate']:.2%}")
+log.info(f"检索工具调用成功率: {summary['tool_call_success_rate']:.2%}")
+log.info(f"累计工具重试次数: {summary['total_tool_retries']}")
+log.info(f"平均检索结果数: {summary['avg_n_retrieval_results']}")
+log.info(f"Agent 耗时: avg={summary['agent_time_seconds']['avg']}s  "
+         f"min={summary['agent_time_seconds']['min']}s  max={summary['agent_time_seconds']['max']}s")
+log.info(f"RAG 对照耗时: avg={summary['rag_time_seconds']['avg']}s  "
+         f"min={summary['rag_time_seconds']['min']}s  max={summary['rag_time_seconds']['max']}s")
+log.info(f"Agent 相对 RAG 平均开销: {summary['avg_overhead_pct_vs_rag']}%")
+log.info(f"各节点平均耗时: {summary['per_node_avg_seconds']}")
+
+with SUMMARY_PATH.open("w", encoding="utf-8") as f:
+    json.dump(summary, f, ensure_ascii=False, indent=2)
+
+log.info(SEP)
+log.info("完成：Agent 底座真实端到端验证 + 汇总指标生成结束。")
