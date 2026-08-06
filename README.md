@@ -4,9 +4,9 @@
 
 > **本仓库只包含源码。** `data/`、`pipeline_output/`、`logs/` 均已 `.gitignore`（原始清单、切分产出、ChromaDB、embedding、BM25 索引等体积巨大，单机上就有上百 GB），需要按下文"快速开始"重新生成。
 
-> 已封装为 FastAPI 服务（`api/`），接口调用说明见 [API.md](API.md)，部署说明见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+> 已封装为 FastAPI 服务（`api/`），接口调用说明见 [API.md](reports/API.md)，部署说明见 [DEPLOYMENT.md](reports/DEPLOYMENT.md)。
 
-> 面向多跳检索/多工具场景的 Agentic 架构：设计见 [AGENT_ARCHITECTURE.md](AGENT_ARCHITECTURE.md)，Week 1 实现（LangGraph 状态机 + 工具调度引擎 + 会话轨迹扩展）与测试/真实验证结果见 [AGENT_WEEK1_REPORT.md](AGENT_WEEK1_REPORT.md)，代码在 [`agent/`](agent/)。尚未接入 API 层（`mode=agent` 路由未实现，仍是设计示意）。
+> 面向多跳检索/多工具场景的 Agentic 架构：设计见 [AGENT_ARCHITECTURE.md](reports/AGENT_ARCHITECTURE.md)，Week 1 实现（LangGraph 状态机 + 工具调度引擎 + 会话轨迹扩展）与测试/真实验证结果见 [AGENT_WEEK1_REPORT.md](reports/AGENT_WEEK1_REPORT.md)，代码在 [`agent/`](agent/)。四节点状态机（entry → tool_execution → answer_generation → termination）已可跑通端到端，但规划/反思/校验/整合四个组件仍是接口占位、图仍是纯串行无真实迭代循环，且尚未接入 API 层（`mode=agent` 路由未实现）。
 
 ## 目录结构
 
@@ -21,10 +21,10 @@ Rag-Med/
 │
 ├── retrieval/                  # 检索模块（详见下文）
 ├── generation/                 # 生成模块（详见下文）
-├── api/                        # FastAPI 服务层（问答/会话/统计/文档接口，见 API.md）
-├── agent/                      # Agentic RAG 架构边界定义（State + 组件接口，尚无执行逻辑，见 AGENT_ARCHITECTURE.md）
+├── api/                        # FastAPI 服务层（问答/会话/统计/文档接口，见 reports/API.md）
+├── agent/                      # Agentic RAG：LangGraph 状态机 + 工具调度引擎（Week 1 已实现，详见下文与 reports/AGENT_WEEK1_REPORT.md），未接入 api/
 │
-├── tests/                      # API 服务层单元/集成测试（unittest + TestClient）
+├── tests/                      # 单元/集成测试（unittest + TestClient）：test_api.py（API 层）、test_agent.py（Agent 状态机/调度引擎，29 项全 mock）
 ├── test_query_processor.py     # 查询理解模块测试
 ├── test_retrieval_pipeline.py  # 检索流水线测试（小规模 test_dir_mode 集合）
 ├── test_retrieval_pipeline_full.py  # 检索流水线测试（全量 pmc_full 集合，内存开销大）
@@ -32,16 +32,16 @@ Rag-Med/
 ├── test_generation_pipeline.py # 生成流水线端到端测试
 ├── test_evaluation_cache_batch.py   # 答案评估/缓存/批量处理测试
 ├── test_hard_constraints.py    # 强约束/幻觉抑制对抗测试
+├── test_agent_pipeline.py      # Agent 状态机端到端验证（真实检索+生成，含与单轮 RAG 的耗时对照）
 │
 ├── utils/                      # 数据获取/分析辅助脚本
 ├── legacy/                     # 已被取代但保留存档的旧版本代码
 ├── notebooks/                  # 云端（AutoDL）GPU 训练/嵌入用 Jupyter Notebook
-├── reports/                    # 数据分析类 Markdown 报告
+├── reports/                    # 数据分析类中文报告 + 接口/部署/架构设计文档（API.md / DEPLOYMENT.md / AGENT_ARCHITECTURE.md / AGENT_WEEK1_REPORT.md）
 ├── data/                       # 原始清单文件（filelist csv/txt）
 ├── pipeline_output/            # 流水线产出物：chunks、ChromaDB、BM25 索引、日志等
 ├── logs/                       # 各模块运行日志（JSONL + 可读文本）
 │
-├── API.md / DEPLOYMENT.md / AGENT_ARCHITECTURE.md   # 接口/部署/架构设计文档
 ├── openapi.json / postman_collection.json           # OpenAPI 快照 / Postman 测试集合
 ├── .env.example                # 环境变量模板（真实 .env 已 gitignore）
 └── requirements.txt
@@ -129,6 +129,24 @@ Chunk 输出 schema（parquet）包含：`chunk_id / text / doc_id / chunk_type 
 
 引用编号使用 `ContextAssembler` 分配的 `_citation_id`（存于每个 chunk 的 metadata），而非列表位置——因为证据评估阶段会从候选列表中剔除不相关来源，若按位置重新编号会与正文中模型引用的 `[来源 N]` 错位。
 
+### Agent 编排模块 `agent/`
+
+面向多跳检索/多工具场景的编排层，Week 1 已落地一条可运行的 LangGraph 状态机，架构设计与实现细节见 [AGENT_ARCHITECTURE.md](reports/AGENT_ARCHITECTURE.md) / [AGENT_WEEK1_REPORT.md](reports/AGENT_WEEK1_REPORT.md)。
+
+| 文件 | 作用 |
+|---|---|
+| `state.py` | `AgentState`（`TypedDict`）：查询/会话信息、工具调用历史与检索结果（累加字段用 `Annotated[list, operator.add]`）、最终答案、迭代/超时控制字段；`should_terminate()` 判断是否超时或达最大迭代轮次 |
+| `nodes.py` | 四个节点：`entry`（清洗查询/语言检测/读取会话历史）→ `tool_execution`（调工具、按 `chunk_id` 去重）→ `answer_generation`（复用 `ContextAssembler` + `answer_generator` 提示词阶段）→ `termination`（整理来源、判定 `DONE`/`FAILED`） |
+| `graph.py` | 用 LangGraph 把四节点串成图；`tool_execution → answer_generation` 用条件边，`path_map` 预留"补充检索""重新规划"两条出边（当前路由函数恒定返回同一目的地）；`recursion_limit` 兜底防意外循环 |
+| `tool_registry.py` | 工具注册表：`register`/`unregister`/`get`/`list_tools`/`describe_all`，支持导出真正可用的 `langchain_core.tools.StructuredTool` |
+| `tool_dispatcher.py` | `ToolDispatcherEngine`：按 pydantic `param_schema` 从 `AgentState` 自动填参 → 校验 → 调用，区分可重试（网络超时等，指数退避最多 3 次）与不可重试异常（参数错误等，不重试） |
+| `retrieval_tool.py` | 把 `RetrievalPipeline.retrieve()` 注册为第一个真实工具（`ToolDispatcherEngine` 之外的所有工具都照此模式接入，不需要改动调度引擎/图本身） |
+| `interfaces.py` | `TaskPlanner`/`RetrievalReflector`/`AnswerValidator`/`ResultIntegrator` 等六个组件的 `Protocol` 接口，目前仍是占位，未接入图 |
+
+`api/session.py` 的 `ConversationTurn` 新增可选字段 `agent_trace`（默认 `None`，对现有 RAG 模式零改动），`SessionManager.get_agent_trace()` 支持按会话 ID 取全部轨迹或按步骤名筛选。
+
+**明确未完成**：规划/反思/校验/整合四个组件仍是接口占位；图是纯串行，两条预留分支边无判断逻辑驱动，不构成真正的迭代循环；API 层 `mode=agent` 路由未实现；工具结果缓存层未实现。端到端验证（`test_agent_pipeline.py`，5 条查询）确认 Agent 执行成功率 5/5，节点级耗时稳定，但"Agent 相对 RAG 总耗时开销"目前样本量太小、噪声大，不具备统计意义，详见 [AGENT_WEEK1_REPORT.md](reports/AGENT_WEEK1_REPORT.md) §5。
+
 ## 快速开始
 
 ### 环境准备
@@ -160,6 +178,16 @@ $env:PYTHONUTF8="1"; python test_generation_pipeline.py
 会依次打印每条测试查询的检索结果、各阶段耗时、最终答案与引用来源，并写入：
 - `logs/generation_pipeline_run.log`（可读日志）
 - `logs/generation_pipeline.jsonl`（结构化日志，每条查询一行）
+
+### 运行 Agent 状态机测试
+
+```powershell
+# 单元测试（全 mock，秒级）
+$env:PYTHONUTF8="1"; python -m unittest tests.test_agent -v
+
+# 端到端验证（真实检索+生成，与单轮 RAG 流水线做耗时对照）
+$env:PYTHONUTF8="1"; python test_agent_pipeline.py
+```
 
 ### 从零构建切分 + 索引（如需重新处理数据）
 
