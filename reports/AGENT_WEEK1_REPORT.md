@@ -92,7 +92,7 @@ entry → tool_execution → answer_generation → termination
 | 各节点平均耗时          | entry ≈0s，tool_execution 0.36s，answer_generation 5.59s，termination ≈0s |
 | 会话 agent_trace 持久化 | 5 轮全部成功写入；展平后 20 条记录；按步骤筛选正确返回 5 条                 |
 
-## 5. 指标可靠性分析（诚实评估，不回避问题）
+## 5. 指标可靠性分析
 
 逐条查询的"Agent 相对 RAG 开销"分别是 **+49.1% / −28.0% / −23.9% / −6.1% / +17.6%**，平均下来约 +1.7%——但这个平均值具有误导性：单条查询的波动幅度远大于平均值本身，是正负抵消凑出来的，不能解读为"Agent 编排开销稳定在 1.7%"。
 
