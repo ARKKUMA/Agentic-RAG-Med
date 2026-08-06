@@ -6,7 +6,7 @@
 
 > 已封装为 FastAPI 服务（`api/`），接口调用说明见 [API.md](API.md)，部署说明见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
-> 面向多跳检索/多工具场景的 Agentic 架构设计（尚未实现，仅边界定义）见 [AGENT_ARCHITECTURE.md](AGENT_ARCHITECTURE.md)，对应类型定义在 [`agent/`](agent/)。
+> 面向多跳检索/多工具场景的 Agentic 架构：设计见 [AGENT_ARCHITECTURE.md](AGENT_ARCHITECTURE.md)，Week 1 实现（LangGraph 状态机 + 工具调度引擎 + 会话轨迹扩展）与测试/真实验证结果见 [AGENT_WEEK1_REPORT.md](AGENT_WEEK1_REPORT.md)，代码在 [`agent/`](agent/)。尚未接入 API 层（`mode=agent` 路由未实现，仍是设计示意）。
 
 ## 目录结构
 
