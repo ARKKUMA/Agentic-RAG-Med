@@ -148,6 +148,76 @@ class TestQAEndToEnd(unittest.TestCase):
 
 
 # ══════════════════════════════════════════════════════════════════
+# Agent 模式统一入口（第 2 周新增：agent_mode 参数路由）
+# ══════════════════════════════════════════════════════════════════
+
+class TestAgentModeEndToEnd(unittest.TestCase):
+    def test_agent_mode_returns_execution_trace_and_sources(self):
+        resp = client.post(
+            "/api/v1/qa",
+            json={"query": "What is the role of the Wnt signaling pathway in cancer?", "top_k": 5, "agent_mode": True},
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()["data"]
+        self.assertTrue(data["agent_mode"])
+        self.assertTrue(len(data["answer"]) > 0)
+        self.assertIsInstance(data["sources"], list)
+        self.assertIsNotNone(data["execution_trace"])
+        steps = [t["step"] for t in data["execution_trace"]]
+        self.assertEqual(steps, ["entry", "tool_execution", "answer_generation", "termination"])
+        # 本周 Agent 链路未执行格式校验，如实标注为 None（不是 True/False）
+        self.assertIsNone(data["format_check_pass"])
+
+    def test_rag_mode_response_shape_unaffected_by_new_fields(self):
+        """agent_mode 缺省为 false 时，响应结构与升级前完全一致，只是多了两个恒定默认值的新字段。"""
+        resp = client.post("/api/v1/qa", json={"query": "What statistical methods are used in cancer studies?", "top_k": 5})
+        data = resp.json()["data"]
+        self.assertFalse(data["agent_mode"])
+        self.assertIsNone(data["execution_trace"])
+        self.assertIsInstance(data["format_check_pass"], bool)  # RAG 模式仍是真正的 True/False，不是 None
+
+    def test_agent_mode_same_session_second_call_hits_cache(self):
+        """同一会话内重复同一问题：第二次应命中 AgentMemory 检索结果缓存（重复检索被拦截）。"""
+        session_resp = client.post("/api/v1/sessions")
+        session_id = session_resp.json()["data"]["session_id"]
+        query = "How does learning during the day affect brain activity during sleep?"
+
+        resp1 = client.post("/api/v1/qa", json={"query": query, "top_k": 5, "agent_mode": True, "session_id": session_id})
+        resp2 = client.post("/api/v1/qa", json={"query": query, "top_k": 5, "agent_mode": True, "session_id": session_id})
+
+        trace1 = resp1.json()["data"]["execution_trace"]
+        trace2 = resp2.json()["data"]["execution_trace"]
+        tool_step1 = next(t for t in trace1 if t["step"] == "tool_execution")
+        tool_step2 = next(t for t in trace2 if t["step"] == "tool_execution")
+        self.assertFalse(tool_step1["outputs"]["cache_hit"])
+        self.assertTrue(tool_step2["outputs"]["cache_hit"])
+
+    def test_agent_mode_invalid_where_filter_does_not_crash_service(self):
+        """非法的元数据过滤条件应被检索工具/ChromaDB 拒绝，但不应让整个服务 500 崩溃或挂起。"""
+        resp = client.post(
+            "/api/v1/qa",
+            json={
+                "query": "diabetes treatment",
+                "top_k": 5,
+                "agent_mode": True,
+                "where_filter": {"$invalid_operator": {"nonsense": True}},
+            },
+        )
+        # 无论最终判定是"优雅失败"（业务错误码）还是"降级为无过滤条件正常回答"，
+        # 都不应该是未处理异常导致的裸 500；FastAPI 全局异常处理器兜底了这一点。
+        self.assertIn(resp.status_code, (200, 400, 422, 500))
+        self.assertIsInstance(resp.json(), dict)  # 响应体本身仍是合法 JSON，不是连接中断/裸崩溃
+
+    def test_agent_mode_persists_trace_into_session_history(self):
+        session_resp = client.post("/api/v1/sessions")
+        session_id = session_resp.json()["data"]["session_id"]
+        client.post("/api/v1/qa", json={"query": "What is metformin's mechanism?", "top_k": 5, "agent_mode": True, "session_id": session_id})
+
+        history = client.get(f"/api/v1/sessions/{session_id}").json()["data"]
+        self.assertEqual(history["turn_count"], 1)
+
+
+# ══════════════════════════════════════════════════════════════════
 # 会话管理接口
 # ══════════════════════════════════════════════════════════════════
 

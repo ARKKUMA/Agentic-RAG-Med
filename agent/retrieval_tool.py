@@ -27,14 +27,21 @@ class RetrievalToolParams(BaseModel):
     query: str = Field(..., min_length=1, description="检索查询文本")
     top_k: int = Field(default=8, ge=1, le=20)
     fusion_strategy: Literal["rrf", "weighted", "simple"] = "rrf"
+    where_filter: dict | None = Field(
+        default=None, description="显式 ChromaDB 元数据过滤条件（第 2 周新增，透传给 RetrievalPipeline.retrieve）",
+    )
 
 
 def register_retrieval_tool(registry: ToolRegistry, retrieval_pipeline, max_retries: int = 2) -> None:
     """把已构建好的 RetrievalPipeline 实例注册为名为 "retrieval" 的工具。"""
 
-    def handler(query: str, top_k: int = 8, fusion_strategy: str = "rrf") -> dict:
+    def handler(
+        query: str, top_k: int = 8, fusion_strategy: str = "rrf", where_filter: dict | None = None,
+    ) -> dict:
         try:
-            return retrieval_pipeline.retrieve(query, top_k=top_k, fusion_strategy=fusion_strategy)
+            return retrieval_pipeline.retrieve(
+                query, top_k=top_k, fusion_strategy=fusion_strategy, where_filter=where_filter,
+            )
         except (ConnectionError, TimeoutError) as e:
             # 向量库连接失败/超时——归类为可重试
             raise RetryableError(f"检索工具连接异常：{e}") from e

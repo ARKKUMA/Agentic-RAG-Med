@@ -24,6 +24,7 @@ from langgraph.graph.state import CompiledStateGraph
 from generation.context_assembler import ContextAssembler
 from generation.llm_generator import LLMGenerator
 
+from .memory import AgentMemory
 from .nodes import make_answer_generation_node, make_entry_node, make_termination_node, make_tool_execution_node
 from .state import AgentState
 from .tool_dispatcher import ToolDispatcherEngine
@@ -50,6 +51,7 @@ def build_agent_graph(
     llm: LLMGenerator,
     session_context_fn: Callable[[str], str] | None = None,
     context_assembler: ContextAssembler | None = None,
+    memory: AgentMemory | None = None,
 ) -> CompiledStateGraph:
     """
     组装并编译 Agent 状态机。
@@ -60,11 +62,13 @@ def build_agent_graph(
         session_context_fn: 可选，entry 节点读取历史会话上下文的函数
             （典型传入 api.session.SessionManager.build_context_prefix）
         context_assembler: 可选，answer_generation 节点用的上下文组装器
+        memory: 可选，第 2 周新增的 AgentMemory（检索结果缓存 + 文献块去重）；
+            不传时 tool_execution 节点行为与第 1 周完全一致
     """
     graph = StateGraph(AgentState)
 
     graph.add_node("entry", make_entry_node(session_context_fn=session_context_fn))
-    graph.add_node("tool_execution", make_tool_execution_node(retrieval_dispatcher))
+    graph.add_node("tool_execution", make_tool_execution_node(retrieval_dispatcher, memory=memory))
     graph.add_node("answer_generation", make_answer_generation_node(llm, context_assembler))
     graph.add_node("termination", make_termination_node())
 

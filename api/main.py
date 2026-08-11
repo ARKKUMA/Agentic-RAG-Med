@@ -21,6 +21,8 @@ from pathlib import Path
 
 from fastapi import FastAPI
 
+from agent import ToolDispatcherEngine, ToolRegistry, build_agent_graph, register_retrieval_tool
+from agent.memory import AgentMemory
 from generation import GenerationCache, LLMGenerator, MedicalGenerationPipeline
 from pmc_vector_index import BGEEmbedder, PMCVectorIndex
 from retrieval import BM25Index, RetrievalPipeline
@@ -91,15 +93,34 @@ async def lifespan(app: FastAPI):
         document_index = DocumentIndex(log=log)
         document_index.build_from_collection(vector_index.collection)
 
-        app.state.generation_pipeline = generation_pipeline
-        app.state.session_manager = SessionManager(
+        session_manager = SessionManager(
             ttl_seconds=settings.session_ttl_seconds, max_turns=settings.session_max_turns,
         )
+
+        # ── Agent 状态机（第 2 周新增）───────────────────────────────
+        # 复用同一个 retrieval_pipeline / llm 实例，不重复加载模型；
+        # AgentMemory 连接不上 Redis 时只记 warning、自动降级为直通，不阻塞启动。
+        log.info("正在组装 Agent 状态机（复用已加载的检索/生成组件）…")
+        agent_registry = ToolRegistry(log=log)
+        register_retrieval_tool(agent_registry, retrieval_pipeline)
+        agent_dispatcher = ToolDispatcherEngine(agent_registry, log=log)
+        agent_memory = AgentMemory(session_manager, redis_url=settings.agent_redis_url, log=log)
+        agent_graph = build_agent_graph(
+            retrieval_dispatcher=agent_dispatcher,
+            llm=llm,
+            session_context_fn=session_manager.build_context_prefix,
+            memory=agent_memory,
+        )
+
+        app.state.generation_pipeline = generation_pipeline
+        app.state.session_manager = session_manager
         app.state.stats_tracker = StatsTracker()
         app.state.health_checker = HealthChecker(
             llm_base_url=settings.rag_llm_base_url, vector_index=vector_index, bm25_index=bm25_index, log=log,
         )
         app.state.document_index = document_index
+        app.state.agent_graph = agent_graph
+        app.state.agent_memory = agent_memory
         app.state.ready = True
         log.info(f"RAG 流水线初始化完成，耗时 {time.time() - t0:.1f}s，服务就绪")
     except Exception as e:

@@ -1,11 +1,16 @@
 """
 agent — Agentic RAG 架构：全局 State（TypedDict） + LangGraph 状态机 +
-工具调度引擎 + 核心组件接口边界定义。
+工具调度引擎 + 分层记忆 + 核心组件接口边界定义。
 
 第 1 周实现范围：LangGraph 状态机落地（entry -> tool_execution ->
 answer_generation -> termination）+ 工具调度引擎（注册/参数校验/重试）+
-会话记忆 agent_trace 扩展。规划/反思/校验节点为预留字段，尚未实现
-（见 agent/interfaces.py 的 Protocol 定义与 AGENT_ARCHITECTURE.md）。
+会话记忆 agent_trace 扩展。
+
+第 2 周新增：AgentMemory（检索结果缓存 + 文献块去重存储，落地
+interfaces.LayeredMemory）+ 元数据过滤透传（where_filter）。
+
+规划/反思/校验节点仍为预留字段，尚未实现（见 agent/interfaces.py 的
+Protocol 定义与 AGENT_ARCHITECTURE.md）。
 """
 
 from .graph import build_agent_graph, route_after_tool_execution, run_agent
@@ -17,6 +22,7 @@ from .interfaces import (
     TaskPlanner,
 )
 from .interfaces import ToolDispatcher as ToolDispatcherProtocol
+from .memory import AgentMemory
 from .retrieval_tool import RetrievalToolParams, register_retrieval_tool
 from .state import (
     AgentState,
@@ -45,6 +51,7 @@ __all__ = [
     "TaskPlanner",
     "ToolDispatcherProtocol",
     "LayeredMemory",
+    "AgentMemory",
     "RetrievalReflector",
     "AnswerValidator",
     "ResultIntegrator",

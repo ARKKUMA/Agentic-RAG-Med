@@ -222,7 +222,8 @@ class MockRetrievalPipeline:
         ]
         self._raise_error = raise_error
 
-    def retrieve(self, query, top_k=8, fusion_strategy="rrf"):
+    def retrieve(self, query, top_k=8, fusion_strategy="rrf", where_filter=None):
+        self.last_where_filter = where_filter
         if self._raise_error is not None:
             raise self._raise_error
         return {"query_info": None, "fused_candidates": len(self._results), "results": self._results}
@@ -249,6 +250,107 @@ def _build_test_graph(retrieval_pipeline=None, llm=None, session_context_fn=None
         llm=llm or MockLLM(),
         session_context_fn=session_context_fn,
     )
+
+
+class FakeMemory:
+    """
+    AgentMemory 的纯内存测试替身（不连真实 Redis），只实现节点实际调用到的
+    三个方法。用于验证 tool_execution 节点"命中缓存则不重复调用工具/
+    去重登记被调用"的编排逻辑本身是否正确——不测 Redis 交互细节（那是
+    tests/test_agent_memory.py 用真实 Redis 覆盖的部分）。
+    """
+
+    def __init__(self):
+        self._cache: dict = {}
+        self.register_chunks_calls: list[tuple] = []
+        self.cache_write_calls = 0
+        self.cache_read_calls = 0
+
+    @staticmethod
+    def _key(tool_name, arguments, session_id):
+        return (tool_name, tuple(sorted(arguments.items())), session_id)
+
+    def get_cached_tool_result(self, tool_name, arguments, session_id=None):
+        self.cache_read_calls += 1
+        return self._cache.get(self._key(tool_name, arguments, session_id))
+
+    def cache_tool_result(self, tool_name, arguments, result, ttl_seconds=None, session_id=None):
+        self.cache_write_calls += 1
+        self._cache[self._key(tool_name, arguments, session_id)] = result
+
+    def register_chunks(self, session_id, chunks):
+        self.register_chunks_calls.append((session_id, [c["chunk_id"] for c in chunks]))
+        return {"n_new": len(chunks), "n_repeat": 0, "tracked": True}
+
+
+class TestAgentMemoryWiring(unittest.TestCase):
+    """tool_execution 节点与 AgentMemory 的编排逻辑（缓存命中拦截 + 去重登记调用）。"""
+
+    def _dispatcher_and_counter(self, results=None):
+        registry = ToolRegistry()
+        pipeline = MockRetrievalPipeline(results=results)
+        register_retrieval_tool_module = __import__("agent.retrieval_tool", fromlist=["register_retrieval_tool"])
+        register_retrieval_tool_module.register_retrieval_tool(registry, pipeline)
+        return ToolDispatcherEngine(registry), pipeline
+
+    def test_cache_miss_then_hit_skips_real_dispatch(self):
+        from agent.nodes import make_tool_execution_node
+
+        dispatcher, pipeline = self._dispatcher_and_counter()
+        memory = FakeMemory()
+        node = make_tool_execution_node(dispatcher, memory=memory)
+
+        state = new_agent_state(query="metformin mechanism", session_id="s1")
+
+        # 第一次：未命中缓存，真实调用一次工具，随后写入缓存
+        update1 = node(state)
+        self.assertFalse(update1["tool_call_history"][0].cached)
+        self.assertEqual(memory.cache_write_calls, 1)
+
+        # 第二次：同样的 query/session，应命中缓存，不再真实调用工具
+        update2 = node(state)
+        self.assertTrue(update2["tool_call_history"][0].cached)
+        self.assertEqual(update2["tool_call_history"][0].result, update1["tool_call_history"][0].result)
+        # 缓存命中不应触发第二次真实写入
+        self.assertEqual(memory.cache_write_calls, 1)
+
+    def test_register_chunks_called_with_session_and_new_results(self):
+        from agent.nodes import make_tool_execution_node
+
+        dispatcher, _ = self._dispatcher_and_counter()
+        memory = FakeMemory()
+        node = make_tool_execution_node(dispatcher, memory=memory)
+
+        state = new_agent_state(query="test", session_id="sess-abc")
+        node(state)
+
+        self.assertEqual(len(memory.register_chunks_calls), 1)
+        session_id, chunk_ids = memory.register_chunks_calls[0]
+        self.assertEqual(session_id, "sess-abc")
+        self.assertEqual(chunk_ids, ["PMC1_body_0", "PMC2_body_0"])
+
+    def test_no_memory_means_no_caching_no_crash(self):
+        """memory=None（第 1 周默认行为）不应受影响——不缓存、不去重登记、正常检索两次。"""
+        from agent.nodes import make_tool_execution_node
+
+        dispatcher, pipeline = self._dispatcher_and_counter()
+        node = make_tool_execution_node(dispatcher, memory=None)
+        state = new_agent_state(query="test", session_id="s1")
+
+        update1 = node(state)
+        update2 = node(state)
+        self.assertFalse(update1["tool_call_history"][0].cached)
+        self.assertFalse(update2["tool_call_history"][0].cached)
+
+    def test_where_filter_passed_through_to_retrieval_pipeline(self):
+        dispatcher, pipeline = self._dispatcher_and_counter()
+        state = new_agent_state(
+            query="test", where_filter={"$and": [{"pub_year": {"$gte": 2020}}]},
+        )
+        args = dispatcher.auto_fill_params("retrieval", state)
+        self.assertIn("where_filter", args)
+        dispatcher.dispatch("retrieval", args)
+        self.assertEqual(pipeline.last_where_filter, {"$and": [{"pub_year": {"$gte": 2020}}]})
 
 
 class TestGraphNodeTransitions(unittest.TestCase):

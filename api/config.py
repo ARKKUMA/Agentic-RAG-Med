@@ -27,5 +27,8 @@ class Settings(BaseSettings):
     session_ttl_seconds: int = 3600
     session_max_turns: int = 20
 
+    # Agent 缓存（第 2 周新增）；开发环境 Redis 跑在 WSL2 容器（仅监听 IPv6 [::1]），localhost 可达
+    agent_redis_url: str = "redis://localhost:6379/0"
+
 
 settings = Settings()

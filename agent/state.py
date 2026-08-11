@@ -78,6 +78,7 @@ class ToolCall:
     retry_count: int = 0
     started_at: float = field(default_factory=time.time)
     elapsed_seconds: float | None = None
+    cached: bool = False   # 第 2 周新增：命中 AgentMemory 检索结果缓存时为 True，未真正调用工具
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -139,6 +140,7 @@ class AgentState(TypedDict, total=False):
     session_id: str | None
     top_k: int
     fusion_strategy: str
+    where_filter: dict | None                                   # 第 2 周新增：显式元数据过滤条件，透传给检索工具
     max_iterations: int
     timeout_seconds: float
     language: str
@@ -183,6 +185,7 @@ def new_agent_state(
     session_id: str | None = None,
     top_k: int = DEFAULT_TOP_K,
     fusion_strategy: str = DEFAULT_FUSION_STRATEGY,
+    where_filter: dict | None = None,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     language: str = "en",
@@ -193,6 +196,7 @@ def new_agent_state(
         session_id=session_id,
         top_k=top_k,
         fusion_strategy=fusion_strategy,
+        where_filter=where_filter,
         max_iterations=max_iterations,
         timeout_seconds=timeout_seconds,
         language=language,

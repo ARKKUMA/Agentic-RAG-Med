@@ -159,6 +159,10 @@ class LLMGenerator:
             "model": self.model_name,
             "done": data.get("done", True),
             "cached": False,
+            # Ollama /api/generate 在 done=True 时附带的真实 token 计数
+            # （非估算），用于 execution_trace 里的"生成 Token 数"字段。
+            "prompt_tokens": data.get("prompt_eval_count"),
+            "completion_tokens": data.get("eval_count"),
         }
         if require_json:
             result["json"] = self._extract_json(raw_text)

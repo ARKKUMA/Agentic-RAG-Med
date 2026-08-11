@@ -16,6 +16,13 @@ termination，对应链路"接收问题→调用检索工具→生成答案→�
     的提示词模板 + 语言指令，调用 generation.llm_generator.LLMGenerator。
     本周只调用这一个生成阶段（产出"初始答案"），不接入证据评估/批判性审查/
     最终组装——那些是 compliance_check/reflections 预留字段对应的未来工作。
+
+第 2 周新增：tool_execution 节点接入 AgentMemory（agent/memory.py）——
+调用工具前先查检索结果缓存，命中则跳过真实检索（ToolCall.cached=True，
+不产生真实的向量/BM25/重排序开销）；未命中则正常调度并在成功后写入缓存；
+无论命中与否都把本轮结果登记进该 session 的文献块去重集合（用于跨轮次
+重复度统计，不剔除当前轮次的结果——见 agent/memory.py 模块说明的设计取舍）。
+memory 参数可选，不传时行为与第 1 周完全一致（不缓存、不去重登记）。
 """
 
 from __future__ import annotations
@@ -28,7 +35,8 @@ from generation.context_assembler import ContextAssembler
 from generation.llm_generator import LLMGenerator
 from generation.prompt_templates import LANGUAGE_DIRECTIVES, MEDICAL_PROMPT_STAGES, detect_query_language
 
-from .state import AgentState, AgentStatus, make_trace_entry
+from .memory import AgentMemory
+from .state import AgentState, AgentStatus, ToolCall, make_trace_entry
 from .tool_dispatcher import ToolDispatcherEngine
 
 log = logging.getLogger("agent.nodes")
@@ -86,11 +94,23 @@ def make_entry_node(
 def make_tool_execution_node(
     dispatcher: ToolDispatcherEngine,
     tool_name: str = "retrieval",
+    memory: AgentMemory | None = None,
 ) -> Callable[[AgentState], dict]:
     def tool_execution_node(state: AgentState) -> dict:
         t0 = time.time()
         args = dispatcher.auto_fill_params(tool_name, state)
-        call = dispatcher.dispatch(tool_name, args)
+        session_id = state.get("session_id")
+
+        cached_result = memory.get_cached_tool_result(tool_name, args, session_id=session_id) if memory else None
+        if cached_result is not None:
+            call = ToolCall(
+                tool_name=tool_name, arguments=args, result=cached_result,
+                success=True, cached=True, elapsed_seconds=round(time.time() - t0, 4),
+            )
+        else:
+            call = dispatcher.dispatch(tool_name, args)
+            if memory and call.success:
+                memory.cache_tool_result(tool_name, args, call.result, session_id=session_id)
 
         new_results: list[dict] = []
         error = None
@@ -100,6 +120,7 @@ def make_tool_execution_node(
             error = call.error
 
         # 去重：按 chunk_id 合并"已有结果"与"本次新结果"（保留先出现的，即相关性更高的排前）
+        # ——这是同一次 Agent 运行内的去重，第 1 周就有；跨轮次的去重统计见下方 dedup_stats。
         existing = state.get("retrieval_results", [])
         seen_ids = {r.get("chunk_id") for r in existing}
         deduped = list(existing)
@@ -109,6 +130,10 @@ def make_tool_execution_node(
                 deduped.append(r)
                 seen_ids.add(cid)
 
+        dedup_stats = {"n_new": len(new_results), "n_repeat": 0, "tracked": False}
+        if memory and session_id and new_results:
+            dedup_stats = memory.register_chunks(session_id, new_results)
+
         trace = make_trace_entry(
             step="tool_execution",
             inputs={"tool_name": tool_name, "arguments": args},
@@ -116,6 +141,8 @@ def make_tool_execution_node(
                 "n_new_results": len(new_results),
                 "n_total_results": len(deduped),
                 "success": call.success,
+                "cache_hit": call.cached,
+                "cross_session_repeat_count": dedup_stats["n_repeat"],
             },
             elapsed_seconds=time.time() - t0,
             status="success" if call.success else "failed",
@@ -165,6 +192,8 @@ def make_answer_generation_node(
 
         error = None
         answer = ""
+        completion_tokens = None
+        prompt_tokens = None
         try:
             out = llm.generate(
                 prompt=prompt,
@@ -173,6 +202,8 @@ def make_answer_generation_node(
                 max_tokens=stage.max_tokens,
             )
             answer = out["text"].strip()
+            completion_tokens = out.get("completion_tokens")
+            prompt_tokens = out.get("prompt_tokens")
         except Exception as e:
             error = f"答案生成失败：{e}"
             log.error(error)
@@ -180,7 +211,11 @@ def make_answer_generation_node(
         trace = make_trace_entry(
             step="answer_generation",
             inputs={"query": query, "context_tokens": context_result["metadata"]["estimated_tokens"]},
-            outputs={"answer_length": len(answer)},
+            outputs={
+                "answer_length": len(answer),
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+            },
             elapsed_seconds=time.time() - t0,
             status="success" if not error else "failed",
             error=error,

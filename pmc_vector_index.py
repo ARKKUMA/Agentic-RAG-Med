@@ -59,6 +59,80 @@ DEFAULT_DB_DIR     = r"d:\Rag-Med\pipeline_output\chroma_db"
 # bge-base-en-v1.5 在加指令时 retrieval 性能稍优
 BGE_QUERY_INSTRUCTION = "Represent this sentence for searching relevant passages: "
 
+# ══════════════════════════════════════════════════════════════════
+# ChromaDB $gt/$gte/$lt/$lte 已知性能缺陷的规避（第 2 周"元数据过滤"接入
+# 时实测发现，非猜测）
+#
+# 本项目锁定的 chromadb==1.5.9，对同一个 1,854 条记录的集合实测：
+#   等值过滤（{"journal": "Nature"}）    ~0.16s
+#   范围过滤（{"pub_year": {"$gte": 2003}}）  > 240s，进程 100% CPU 卡住
+# 这不是本项目代码的 bug，是上游已知问题：
+#   https://github.com/chroma-core/chroma/issues/1043
+#   "[Bug]: where filter lags with 100% cpu use"
+# 复现方式见 reports/AGENT_WEEK2_REPORT.md 的"元数据过滤"章节。
+#
+# 规避策略：把 where_filter 拆成"安全条件"（等值/$in/$ne，交给 ChromaDB
+# 原生 where 过滤，走的是正常速度的代码路径）和"range 条件"（$gt/$gte/
+# $lt/$lte，绕开 ChromaDB 的 where，改成"扩大候选池 + 客户端 Python 过滤"）。
+# 这是有实际代价的权衡，不是免费的：扩大候选池意味着如果真正满足 range
+# 条件的文档在语义相似度排名里排得很靠后（不在候选池内），会被漏掉——
+# 对小集合（几千级）候选池可以设得很大，代价可忽略；对全量语料
+# （pmc_full，580 万+ chunk）候选池设了硬上限（见 MAX_RANGE_FILTER_CANDIDATES），
+# 极端情况下可能有轻微召回损失，这是明确记录的已知局限，而不是被掩盖的问题。
+# ══════════════════════════════════════════════════════════════════
+
+_RANGE_OPERATORS = {"$gt", "$gte", "$lt", "$lte"}
+MAX_RANGE_FILTER_CANDIDATES = 2000   # 候选池上限：小集合远够用，大集合里是有意的召回-速度权衡
+
+
+def _split_where_filter(where_filter: dict | None) -> tuple[dict | None, list[tuple[str, str, float]]]:
+    """
+    把 where_filter 拆成 (safe_where, range_conditions)。
+    支持两种输入形状：{"field": {"$gte": x}, ...} 和 {"$and": [{"field": {...}}, ...]}
+    （后者是 retrieval/query_processor.py 自己生成过滤条件时用的形状）。
+    """
+    if not where_filter:
+        return where_filter, []
+
+    clauses = where_filter["$and"] if "$and" in where_filter else [{k: v} for k, v in where_filter.items()]
+
+    safe_clauses: list[dict] = []
+    range_conditions: list[tuple[str, str, float]] = []
+    for clause in clauses:
+        for field, value in clause.items():
+            if isinstance(value, dict) and any(op in value for op in _RANGE_OPERATORS):
+                for op, threshold in value.items():
+                    if op in _RANGE_OPERATORS:
+                        range_conditions.append((field, op, threshold))
+                    else:
+                        safe_clauses.append({field: {op: threshold}})
+            else:
+                safe_clauses.append({field: value})
+
+    if not safe_clauses:
+        safe_where = None
+    elif len(safe_clauses) == 1:
+        safe_where = safe_clauses[0]
+    else:
+        safe_where = {"$and": safe_clauses}
+    return safe_where, range_conditions
+
+
+def _passes_range_conditions(metadata: dict, range_conditions: list[tuple[str, str, float]]) -> bool:
+    for field, op, threshold in range_conditions:
+        val = metadata.get(field)
+        if val is None:
+            return False
+        if op == "$gt" and not (val > threshold):
+            return False
+        if op == "$gte" and not (val >= threshold):
+            return False
+        if op == "$lt" and not (val < threshold):
+            return False
+        if op == "$lte" and not (val <= threshold):
+            return False
+    return True
+
 # ChromaDB 元数据字段：str 类型的 None 替换为 ""，int 类型替换为 0
 _STR_META_FIELDS = [
     "doc_id", "chunk_type", "section_title", "section_path",
@@ -597,14 +671,23 @@ class PMCVectorIndex:
         # 生成查询向量（含 BGE 指令前缀）
         q_emb = self.embedder.embed_query(query_text)
 
+        # 拆分 where_filter：range 条件（$gt/$gte/$lt/$lte）绕开 ChromaDB 原生
+        # where（已知性能缺陷，见模块顶部 MAX_RANGE_FILTER_CANDIDATES 附近的说明），
+        # 改为扩大候选池后客户端二次过滤；等值等"安全"条件仍交给 ChromaDB 原生过滤。
+        safe_where, range_conditions = _split_where_filter(where_filter)
+        collection_count = self.collection.count()
+        fetch_n = n_results
+        if range_conditions:
+            fetch_n = min(max(n_results * 10, 50), collection_count, MAX_RANGE_FILTER_CANDIDATES)
+
         # ChromaDB 查询（余弦距离，越低越相似）
         kwargs: dict = {
             "query_embeddings": [q_emb],
-            "n_results":        min(n_results, self.collection.count()),
+            "n_results":        min(fetch_n, collection_count),
             "include":          ["documents", "metadatas", "distances"],
         }
-        if where_filter:
-            kwargs["where"] = where_filter
+        if safe_where:
+            kwargs["where"] = safe_where
 
         raw = self.collection.query(**kwargs)
 
@@ -615,15 +698,21 @@ class PMCVectorIndex:
         distances = raw["distances"][0]
 
         results = []
-        for rank, (cid, doc, meta, dist) in enumerate(zip(ids, docs, metas, distances), start=1):
+        for cid, doc, meta, dist in zip(ids, docs, metas, distances):
+            if range_conditions and not _passes_range_conditions(meta, range_conditions):
+                continue
             results.append({
-                "rank":         rank,
                 "chunk_id":     cid,
                 "distance":     round(float(dist), 6),
                 "similarity":   round(1.0 - float(dist), 6),
                 "text_preview": doc[:200] if doc else "",
                 "metadata":     meta,
             })
+            if range_conditions and len(results) >= n_results:
+                break   # 候选池比 n_results 大（见上面 fetch_n），过滤后截断到调用方要的数量
+
+        for rank, r in enumerate(results, start=1):
+            r["rank"] = rank   # range 过滤会跳过部分候选，rank 必须在过滤后重新连续编号
 
         return {
             "query":    query_text,

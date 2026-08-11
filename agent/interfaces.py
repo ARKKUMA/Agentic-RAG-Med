@@ -87,19 +87,40 @@ class LayeredMemory(Protocol):
     复用关系：
       - 会话记忆层直接复用 api.session.SessionManager（已实现的 TTL 会话存储 +
         build_context_prefix 指代消解渲染），不重新实现一遍。
-      - 工具结果缓存层复用/泛化 generation.cache.GenerationCache——现有实现
-        的键是 hash(model+system_prompt+prompt+temperature)，泛化后键变为
-        hash(tool_name+arguments)，同一套 LRU+TTL 淘汰机制继续有效。
+      - 工具结果缓存层复用/泛化 generation.cache.GenerationCache 的设计思路
+        （键哈希 + TTL 淘汰），但第 2 周实现（agent/memory.py::AgentMemory）
+        换成了 Redis 后端而不是进程内 LRU——原因是任务书明确要求"缓存与会话
+        生命周期绑定、会话过期自动清理"，Redis 的 EXPIRE/TTL 原生支持这个
+        语义，且为未来跨进程/多实例部署留出了空间。
+
+    第 2 周落地实现（agent/memory.py::AgentMemory）：
+      - get_cached_tool_result / cache_tool_result 新增可选 session_id 参数——
+        缓存与会话生命周期绑定后，键里必须包含 session_id 才能实现"会话过期
+        自动清理对应缓存"（同一 Redis key 的 TTL 直接对齐 session 的 TTL）。
+        不传 session_id 时退化为全局命名空间（不与任何会话绑定，需要调用方
+        自行管理失效），保持对未来非会话场景工具调用的兼容。
+      - 额外提供 register_chunks / get_seen_chunk_ids（文献块去重存储层），
+        Protocol 未声明这两个方法——结构化子类型（duck typing）允许具体实现
+        提供比 Protocol 更多的方法，不影响 isinstance 检查。
     """
 
     def get_session_context(self, session_id: str) -> str:
         """渲染历史对话为简短前缀，语义与现有 SessionManager.build_context_prefix 一致。"""
         ...
 
-    def get_cached_tool_result(self, tool_name: str, arguments: dict) -> Any | None:
+    def get_cached_tool_result(
+        self, tool_name: str, arguments: dict, session_id: str | None = None,
+    ) -> Any | None:
         ...
 
-    def cache_tool_result(self, tool_name: str, arguments: dict, result: Any, ttl_seconds: float | None = None) -> None:
+    def cache_tool_result(
+        self,
+        tool_name: str,
+        arguments: dict,
+        result: Any,
+        ttl_seconds: float | None = None,
+        session_id: str | None = None,
+    ) -> None:
         ...
 
 

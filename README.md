@@ -6,7 +6,7 @@
 
 > 已封装为 FastAPI 服务（`api/`），接口调用说明见 [API.md](reports/API.md)，部署说明见 [DEPLOYMENT.md](reports/DEPLOYMENT.md)。
 
-> 面向多跳检索/多工具场景的 Agentic 架构：设计见 [AGENT_ARCHITECTURE.md](reports/AGENT_ARCHITECTURE.md)，Week 1 实现（LangGraph 状态机 + 工具调度引擎 + 会话轨迹扩展）与测试/真实验证结果见 [AGENT_WEEK1_REPORT.md](reports/AGENT_WEEK1_REPORT.md)，代码在 [`agent/`](agent/)。四节点状态机（entry → tool_execution → answer_generation → termination）已可跑通端到端，但规划/反思/校验/整合四个组件仍是接口占位、图仍是纯串行无真实迭代循环，且尚未接入 API 层（`mode=agent` 路由未实现）。
+> 面向多跳检索/多工具场景的 Agentic 架构：设计见 [AGENT_ARCHITECTURE.md](reports/AGENT_ARCHITECTURE.md)，Week 1 实现（LangGraph 状态机 + 工具调度引擎 + 会话轨迹扩展）见 [AGENT_WEEK1_REPORT.md](reports/AGENT_WEEK1_REPORT.md)，Week 2 实现（Redis 缓存记忆 + 文献块去重 + `agent_mode` 统一入口，已真正接入 `api/`）与测试/真实验证结果见 [AGENT_WEEK2_REPORT.md](reports/AGENT_WEEK2_REPORT.md)，代码在 [`agent/`](agent/)。四节点状态机（entry → tool_execution → answer_generation → termination）已可通过 `POST /api/v1/qa` 的 `agent_mode=true` 真实调用，但规划/反思/校验/整合四个组件仍是接口占位、图仍是纯串行无真实迭代循环，流式接口尚未接入 Agent 链路。
 
 ## 目录结构
 
@@ -22,9 +22,9 @@ Rag-Med/
 ├── retrieval/                  # 检索模块（详见下文）
 ├── generation/                 # 生成模块（详见下文）
 ├── api/                        # FastAPI 服务层（问答/会话/统计/文档接口，见 reports/API.md）
-├── agent/                      # Agentic RAG：LangGraph 状态机 + 工具调度引擎（Week 1 已实现，详见下文与 reports/AGENT_WEEK1_REPORT.md），未接入 api/
+├── agent/                      # Agentic RAG：LangGraph 状态机 + 工具调度引擎 + Redis 缓存记忆（Week 1/2 已实现，详见下文与 reports/AGENT_WEEK1_REPORT.md、AGENT_WEEK2_REPORT.md），已接入 api/（agent_mode 路由）
 │
-├── tests/                      # 单元/集成测试（unittest + TestClient）：test_api.py（API 层）、test_agent.py（Agent 状态机/调度引擎，29 项全 mock）
+├── tests/                      # 单元/集成/回归测试（unittest + TestClient）：test_regression_suite.py（1000+ 条数据驱动回归，纯逻辑、秒级）、test_api.py（API 层，含真实 LLM）、test_agent.py（Agent 状态机/调度引擎/缓存编排）、test_agent_memory.py（AgentMemory 真实 Redis）、regression_corpus.py（回归语料生成器）
 ├── test_query_processor.py     # 查询理解模块测试
 ├── test_retrieval_pipeline.py  # 检索流水线测试（小规模 test_dir_mode 集合）
 ├── test_retrieval_pipeline_full.py  # 检索流水线测试（全量 pmc_full 集合，内存开销大）
@@ -37,7 +37,7 @@ Rag-Med/
 ├── utils/                      # 数据获取/分析辅助脚本
 ├── legacy/                     # 已被取代但保留存档的旧版本代码
 ├── notebooks/                  # 云端（AutoDL）GPU 训练/嵌入用 Jupyter Notebook
-├── reports/                    # 数据分析类中文报告 + 接口/部署/架构设计文档（API.md / DEPLOYMENT.md / AGENT_ARCHITECTURE.md / AGENT_WEEK1_REPORT.md）
+├── reports/                    # 数据分析类中文报告 + 接口/部署/架构设计文档（API.md / DEPLOYMENT.md / AGENT_ARCHITECTURE.md / AGENT_WEEK1_REPORT.md / AGENT_WEEK2_REPORT.md）
 ├── data/                       # 原始清单文件（filelist csv/txt）
 ├── pipeline_output/            # 流水线产出物：chunks、ChromaDB、BM25 索引、日志等
 ├── logs/                       # 各模块运行日志（JSONL + 可读文本）
@@ -131,21 +131,24 @@ Chunk 输出 schema（parquet）包含：`chunk_id / text / doc_id / chunk_type 
 
 ### Agent 编排模块 `agent/`
 
-面向多跳检索/多工具场景的编排层，Week 1 已落地一条可运行的 LangGraph 状态机，架构设计与实现细节见 [AGENT_ARCHITECTURE.md](reports/AGENT_ARCHITECTURE.md) / [AGENT_WEEK1_REPORT.md](reports/AGENT_WEEK1_REPORT.md)。
+面向多跳检索/多工具场景的编排层，Week 1 落地了可运行的 LangGraph 状态机，Week 2 补上了 Redis 缓存记忆并真正接入了 `api/`（`agent_mode` 路由）。架构设计与实现细节见 [AGENT_ARCHITECTURE.md](reports/AGENT_ARCHITECTURE.md) / [AGENT_WEEK1_REPORT.md](reports/AGENT_WEEK1_REPORT.md) / [AGENT_WEEK2_REPORT.md](reports/AGENT_WEEK2_REPORT.md)。
 
 | 文件 | 作用 |
 |---|---|
-| `state.py` | `AgentState`（`TypedDict`）：查询/会话信息、工具调用历史与检索结果（累加字段用 `Annotated[list, operator.add]`）、最终答案、迭代/超时控制字段；`should_terminate()` 判断是否超时或达最大迭代轮次 |
-| `nodes.py` | 四个节点：`entry`（清洗查询/语言检测/读取会话历史）→ `tool_execution`（调工具、按 `chunk_id` 去重）→ `answer_generation`（复用 `ContextAssembler` + `answer_generator` 提示词阶段）→ `termination`（整理来源、判定 `DONE`/`FAILED`） |
+| `state.py` | `AgentState`（`TypedDict`）：查询/会话信息、`where_filter` 元数据过滤条件、工具调用历史与检索结果（累加字段用 `Annotated[list, operator.add]`）、最终答案、迭代/超时控制字段；`should_terminate()` 判断是否超时或达最大迭代轮次 |
+| `nodes.py` | 四个节点：`entry`（清洗查询/语言检测/读取会话历史）→ `tool_execution`（查缓存 → 未命中则调工具 → 按 `chunk_id` 去重 → 登记跨轮次去重集合）→ `answer_generation`（复用 `ContextAssembler` + `answer_generator` 提示词阶段，记录 prompt/completion token 数）→ `termination`（整理来源、判定 `DONE`/`FAILED`） |
 | `graph.py` | 用 LangGraph 把四节点串成图；`tool_execution → answer_generation` 用条件边，`path_map` 预留"补充检索""重新规划"两条出边（当前路由函数恒定返回同一目的地）；`recursion_limit` 兜底防意外循环 |
+| `memory.py` | `AgentMemory`（落地 `interfaces.LayeredMemory`）：Redis 支撑的检索结果缓存（键与会话生命周期绑定，TTL 滑动过期）+ 文献块去重存储（Sorted Set，跨轮次分数合并）；Redis 不可达时自动降级为直通，不影响正确性 |
 | `tool_registry.py` | 工具注册表：`register`/`unregister`/`get`/`list_tools`/`describe_all`，支持导出真正可用的 `langchain_core.tools.StructuredTool` |
 | `tool_dispatcher.py` | `ToolDispatcherEngine`：按 pydantic `param_schema` 从 `AgentState` 自动填参 → 校验 → 调用，区分可重试（网络超时等，指数退避最多 3 次）与不可重试异常（参数错误等，不重试） |
-| `retrieval_tool.py` | 把 `RetrievalPipeline.retrieve()` 注册为第一个真实工具（`ToolDispatcherEngine` 之外的所有工具都照此模式接入，不需要改动调度引擎/图本身） |
-| `interfaces.py` | `TaskPlanner`/`RetrievalReflector`/`AnswerValidator`/`ResultIntegrator` 等六个组件的 `Protocol` 接口，目前仍是占位，未接入图 |
+| `retrieval_tool.py` | 把 `RetrievalPipeline.retrieve()` 注册为第一个真实工具，支持 `where_filter` 透传（`ToolDispatcherEngine` 之外的所有工具都照此模式接入，不需要改动调度引擎/图本身） |
+| `interfaces.py` | `TaskPlanner`/`RetrievalReflector`/`AnswerValidator`/`ResultIntegrator` 等六个组件的 `Protocol` 接口，目前仍是占位，未接入图；`LayeredMemory` 已由 `memory.py` 落地实现 |
 
-`api/session.py` 的 `ConversationTurn` 新增可选字段 `agent_trace`（默认 `None`，对现有 RAG 模式零改动），`SessionManager.get_agent_trace()` 支持按会话 ID 取全部轨迹或按步骤名筛选。
+`api/session.py` 的 `ConversationTurn` 新增可选字段 `agent_trace`（默认 `None`，对现有 RAG 模式零改动），`SessionManager.get_agent_trace()` 支持按会话 ID 取全部轨迹或按步骤名筛选。`api/routers/qa.py::ask()` 按请求体 `agent_mode` 字段路由到 Agent 状态机或原有 RAG 流水线，响应结构新增 `execution_trace`/`agent_mode` 字段，原有字段 100% 兼容。
 
-**明确未完成**：规划/反思/校验/整合四个组件仍是接口占位；图是纯串行，两条预留分支边无判断逻辑驱动，不构成真正的迭代循环；API 层 `mode=agent` 路由未实现；工具结果缓存层未实现。端到端验证（`test_agent_pipeline.py`，5 条查询）确认 Agent 执行成功率 5/5，节点级耗时稳定，但"Agent 相对 RAG 总耗时开销"目前样本量太小、噪声大，不具备统计意义，详见 [AGENT_WEEK1_REPORT.md](reports/AGENT_WEEK1_REPORT.md) §5。
+**Week 2 附带发现并修复**：验证元数据过滤时发现 ChromaDB（本项目锁定 `1.5.9`）在 `$gt`/`$gte`/`$lt`/`$lte` 范围过滤上有已知上游性能缺陷（[chroma-core/chroma#1043](https://github.com/chroma-core/chroma/issues/1043)），实测单次查询从 0.26s 劣化到 247.78s；已在 `pmc_vector_index.py::query()` 里加了绕行（范围条件走扩大候选池 + 客户端二次过滤），详见 [AGENT_WEEK2_REPORT.md](reports/AGENT_WEEK2_REPORT.md) §3。
+
+**明确未完成**：规划/反思/校验/整合四个组件仍是接口占位；图是纯串行，两条预留分支边无判断逻辑驱动，不构成真正的迭代循环；流式接口（`/api/v1/qa/stream`）尚未接入 `agent_mode`。端到端验证确认 Agent 执行成功率 100%、缓存命中后检索节点耗时从 0.28s 降到 0.0009s、三类异常场景（非法过滤条件/检索工具持续失败/Redis 不可达）均能优雅降级不崩溃，但"Agent 相对 RAG 总耗时开销"这个指标样本量太小、噪声大，不具备统计意义，详见 [AGENT_WEEK1_REPORT.md](reports/AGENT_WEEK1_REPORT.md) §5 与 [AGENT_WEEK2_REPORT.md](reports/AGENT_WEEK2_REPORT.md) §5。
 
 ## 快速开始
 
@@ -198,6 +201,41 @@ $env:PYTHONUTF8="1"; python pmc_document_splitter.py --split full --fulltext
 # 构建向量索引
 python pmc_vector_index.py --input-dir pipeline_output/batches_full --collection pmc_full --resume
 ```
+
+## 测试
+
+测试分三层，兼顾"秒级全量回归"与"真实 LLM 端到端"：
+
+| 层 | 文件 | 规模 | 依赖 | 用途 |
+|---|---|---|---|---|
+| 快速回归（数据驱动，纯逻辑） | `tests/test_regression_suite.py` + `tests/regression_corpus.py` | **1001 条**（`Ran 1003 tests`，~0.03s） | 无（不加载模型/不连 Redis/不调 LLM） | 过滤条件拆分与判定、缓存键、参数规范化、查询理解（缩写/同义词/中文翻译/时间过滤）、引用抽取校验、上下文去重与多样性、工具调度重试分类、会话生命周期、Agent 状态终止、BM25 分词、格式章节校验 |
+| 真实 LLM 回归（数据驱动，调模型） | `tests/test_regression_llm.py` | **1148 条断言**（`Ran 1149 tests`，~6.9min） | 真实 BGE/ChromaDB/BM25/reranker/Ollama/Redis | 40 次真实"检索+生成"（RAG/Agent/带过滤/同会话重复）经 run-once fixture 复用给 1148 条断言：状态、答案、来源字段、execution_trace（步骤/耗时/生成 Token 数）、缓存命中、引用不越界、语言匹配等 |
+| 真实集成/端到端 | `tests/test_api.py`、`tests/test_agent.py`、`tests/test_agent_memory.py`、`test_agent_pipeline_week2.py` | ~90 条 | 同上 | API 全接口契约、Agent 状态机、真实 Redis 缓存、真实多查询端到端 |
+
+```powershell
+$env:PYTHONUTF8="1"
+
+# 快速回归：1000+ 条，秒级，无需任何模型/服务
+python -m unittest tests.test_regression_suite            # 汇总（Ran 1003 tests）
+python -m unittest tests.test_regression_suite -v         # 逐条
+python -m unittest tests.test_regression_suite -k where   # 按名字筛某类
+
+# 重新生成/查看回归语料（落盘为 tests/regression_corpus.jsonl，可人工审阅/版本化）
+python tests/regression_corpus.py
+
+# 真实 LLM 回归：1148 条断言 / 40 次真实调用，约 7 分钟（需 Ollama + Redis）
+python -m unittest tests.test_regression_llm
+# 冒烟（只跑指定几组，验证 harness）：
+$env:LLM_REG_IDS="rag_en_0,agent_en_0,agent_cache_first_0,agent_cache_second_0"; python -m unittest tests.test_regression_llm
+
+# 真实集成测试（需 Ollama 在跑；test_agent_memory 需本机 Redis）
+python -m unittest tests.test_api tests.test_agent tests.test_agent_memory
+```
+
+回归语料的"期望值"尽量独立推导（如"两个不同输入必须得到不同缓存键"是关系断言、
+而非某个绝对哈希值），避免"用被测函数自己算一遍期望"的循环验证。构建过程中确实
+靠这套语料抓出并修正了几处期望假设错误（中文缩写在缩写展开前已被翻译、
+`max_per_source` 只降优先级不丢弃、空 dict 过滤条件原样返回等），说明它不是走过场。
 
 ## 已知限制
 

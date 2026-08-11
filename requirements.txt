@@ -33,6 +33,15 @@ pydantic==2.12.3
 pydantic-settings==2.10.1
 python-dotenv==1.1.0
 
+# ── Agent 编排（agent/ 包，Week 1 起使用，此前未补进本文件，一并补上）──
+langgraph==1.2.6
+
+# ── Agent 缓存记忆（第 2 周新增）───────────────────────────────────
+# 仅客户端；Redis 服务需单独起。开发环境用跑在 WSL2 里的 Redis 8.10 容器
+# （localhost:6379 可达）；无容器时也可用 https://github.com/tporadowski/redis
+# 的 Windows 移植版兜底。详见 reports/AGENT_WEEK2_REPORT.md §2.1。
+redis==5.2.1
+
 # ── 嵌入模型 ──────────────────────────────────────────────────────
 sentence-transformers==5.6.0
 transformers==5.12.1
